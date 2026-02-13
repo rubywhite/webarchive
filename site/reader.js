@@ -128,7 +128,11 @@ const fixImages = (container, timestamp) => {
 };
 
 const applyPayload = (payload, { fromCache = false } = {}) => {
-  titleEl.textContent = payload.title || "Archived page";
+  const headline = payload.title || "Archived page";
+  titleEl.textContent = headline;
+  if (headline) {
+    document.title = headline;
+  }
   bylineEl.textContent = payload.byline || payload.excerpt || "";
   archiveLink.href = payload.archiveUrl;
   originalUrl.textContent = payload.originalUrl || "";
@@ -163,6 +167,7 @@ if (cached) {
   updateShareButton(cached.originalUrl || url, cacheKey);
 } else if (!url) {
   titleEl.textContent = "Missing URL";
+  document.title = "Missing URL";
   setStatus("Add ?url= to the address, or go back to the homepage.", "error");
 } else {
   setStatus("Loading archived reader view...", "loading");
@@ -175,6 +180,7 @@ if (cached) {
       }
       if (data.status === "blocked") {
         titleEl.textContent = "Archive unavailable";
+        document.title = "Archive unavailable";
         const submission = data.submission || {};
         const suffix = submission.statusCode ? ` (${submission.statusCode})` : "";
         const detail = submission.label
@@ -191,6 +197,7 @@ if (cached) {
       }
       if (data.status === "submitted") {
         titleEl.textContent = "Archive submitted";
+        document.title = "Archive submitted";
         setStatus(data.message || "Archive submitted.", "info");
         if (data.archiveUrl) {
           archiveLink.href = data.archiveUrl;
@@ -228,6 +235,7 @@ if (cached) {
     })
     .catch((error) => {
       titleEl.textContent = "Could not load reader view";
+      document.title = "Could not load reader view";
       setStatus(error.message, "error");
     });
 }
