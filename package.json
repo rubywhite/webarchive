@@ -1,0 +1,13 @@
+{
+  "name": "webarchive",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@mozilla/readability": "^0.4.4",
+    "jsdom": "^24.0.0"
+  }
+}

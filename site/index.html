@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Web Archive Reader</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="page-glow" aria-hidden="true"></div>
+    <header class="site-header">
+      <a class="brand" href="/">
+        <span class="brand-mark">From the Internet Archive</span>
+      </a>
+    </header>
+
+    <main>
+      <section class="hero">
+        <div class="hero-text">
+          <p class="eyebrow">Wayback Assistant</p>
+          <h1>Check the archive. Read the page.</h1>
+          <p class="subhead">
+            Paste any URL to see if it is already stored on the Wayback Machine.
+            If it is, you will get a clean reader view and a shareable cache link.
+          </p>
+        </div>
+        <form id="archive-form" class="archive-form" novalidate>
+          <label class="input-label" for="url-input">Page URL</label>
+          <div class="input-row">
+            <input
+              id="url-input"
+              name="url"
+              type="url"
+              placeholder="https://example.com/story"
+              required
+              autocomplete="off"
+              spellcheck="false"
+            />
+            <button type="submit">Check Archive</button>
+          </div>
+          <p class="status" id="status" role="status" aria-live="polite"></p>
+        </form>
+      </section>
+
+      <section id="result" class="result hidden">
+        <div class="result-header">
+          <div class="result-meta">
+            <p class="result-title" id="reader-title"></p>
+            <p class="result-byline" id="reader-byline"></p>
+          </div>
+          <div class="result-links">
+            <a id="archive-link" href="#" target="_blank" rel="noreferrer">View on web.archive.org</a>
+            <div class="reader-link-row">
+              <a id="reader-link" href="#">Open clean reader view</a>
+              <button id="share-button" class="share-button" type="button" disabled>
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M16 3H8a2 2 0 0 0-2 2v10h2V5h8V3Zm3 4H12a2 2 0 0 0-2 2v12h9a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2Zm0 14h-7V9h7v12Z"/>
+                </svg>
+                Share
+              </button>
+            </div>
+            <span id="archive-source" class="archive-source"></span>
+            <span id="original-url" class="original-url"></span>
+          </div>
+        </div>
+        <article id="reader-content" class="reader"></article>
+      </section>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>
