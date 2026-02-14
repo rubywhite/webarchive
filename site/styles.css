@@ -605,6 +605,9 @@ button:disabled {
 }
 
 .reader-mode .reader {
+  width: 100%;
+  max-width: none;
+  margin: 0;
   background: rgba(255, 255, 255, 0.92);
   border-radius: 24px;
   padding: clamp(22px, 3vw, 34px);
