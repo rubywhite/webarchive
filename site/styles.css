@@ -604,6 +604,14 @@ button:disabled {
   line-height: 1.75;
 }
 
+.reader-mode .reader {
+  background: rgba(255, 255, 255, 0.92);
+  border-radius: 24px;
+  padding: clamp(22px, 3vw, 34px);
+  border: 1px solid var(--border);
+  box-shadow: 0 30px 60px rgba(31, 26, 20, 0.12);
+}
+
 .reader h1,
 .reader h2,
 .reader h3 {
