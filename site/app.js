@@ -105,6 +105,16 @@ const resetResult = () => {
 
 const fixImagesInContainer = (container, timestamp) => {
   if (!container) return;
+  const stripArchivePrefix = (url) =>
+    String(url || "").replace(/^https?:\/\/web\.archive\.org\/web\/\d{14}[a-z]{0,2}_?\//, "");
+  const isValidHttpUrl = (value) => {
+    try {
+      const parsed = new URL(value);
+      return parsed.protocol === "http:" || parsed.protocol === "https:";
+    } catch (error) {
+      return false;
+    }
+  };
   const ensureArchiveImage = (url) => {
     if (!url) return url;
     if (url.includes("web.archive.org/web/") && !url.includes("im_/")) {
@@ -115,24 +125,65 @@ const fixImagesInContainer = (container, timestamp) => {
     }
     return url;
   };
+  const choosePrimaryAndFallback = (rawSrc) => {
+    const source = String(rawSrc || "").trim();
+    if (!source) {
+      return { primary: "", fallback: "" };
+    }
+    const archiveSrc = ensureArchiveImage(source);
+    const stripped = stripArchivePrefix(archiveSrc);
+    const hasArchiveWrapper = archiveSrc.includes("web.archive.org/web/");
+
+    if (hasArchiveWrapper && isValidHttpUrl(stripped)) {
+      return { primary: stripped, fallback: archiveSrc === stripped ? "" : archiveSrc };
+    }
+    if (isValidHttpUrl(source)) {
+      return { primary: source, fallback: archiveSrc !== source ? archiveSrc : "" };
+    }
+    if (isValidHttpUrl(stripped)) {
+      return { primary: stripped, fallback: archiveSrc !== stripped ? archiveSrc : "" };
+    }
+    return { primary: archiveSrc || source, fallback: "" };
+  };
+  const attachFallback = (img) => {
+    if (img.dataset.panaFallbackBound === "1") return;
+    const tryFallback = () => {
+      if (img.dataset.panaFallbackTried === "1") return;
+      const fallback = img.dataset.fallbackSrc || "";
+      if (!fallback || fallback === img.currentSrc || fallback === img.src) return;
+      img.dataset.panaFallbackTried = "1";
+      img.src = fallback;
+    };
+    img.dataset.panaFallbackBound = "1";
+    img.addEventListener("error", () => {
+      tryFallback();
+    });
+    img.addEventListener("load", () => {
+      if (img.naturalWidth === 0 || img.naturalHeight === 0) {
+        tryFallback();
+      }
+    });
+  };
 
   container.querySelectorAll("picture").forEach((picture) => {
     const img = picture.querySelector("img");
-    if (!img) return;
-    const existing = img.getAttribute("src");
-    if (existing && !existing.startsWith("data:") && existing !== "about:blank") {
-      return;
+    if (img) {
+      const existing = img.getAttribute("src");
+      if (!existing || existing.startsWith("data:") || existing === "about:blank") {
+        const source = picture.querySelector("source[srcset], source[data-srcset]");
+        if (source) {
+          const srcset = source.getAttribute("srcset") || source.getAttribute("data-srcset");
+          if (srcset) {
+            const first = srcset.split(",")[0]?.trim();
+            const url = first ? first.split(/\s+/)[0] : "";
+            if (url) {
+              img.setAttribute("src", url);
+            }
+          }
+        }
+      }
     }
-    const source = picture.querySelector("source[srcset], source[data-srcset]");
-    if (!source) return;
-    const srcset = source.getAttribute("srcset") || source.getAttribute("data-srcset");
-    if (!srcset) return;
-    const first = srcset.split(",")[0]?.trim();
-    if (!first) return;
-    const url = first.split(/\s+/)[0];
-    if (url) {
-      img.setAttribute("src", url);
-    }
+    picture.querySelectorAll("source").forEach((sourceNode) => sourceNode.remove());
   });
 
   container.querySelectorAll("img").forEach((img) => {
@@ -154,8 +205,20 @@ const fixImagesInContainer = (container, timestamp) => {
       }
     }
     if (src) {
-      img.setAttribute("src", ensureArchiveImage(src));
+      const { primary, fallback } = choosePrimaryAndFallback(src);
+      if (primary) {
+        img.setAttribute("src", primary);
+      }
+      if (fallback) {
+        img.dataset.fallbackSrc = fallback;
+      } else {
+        img.dataset.fallbackSrc = "";
+      }
     }
+    img.removeAttribute("srcset");
+    img.removeAttribute("sizes");
+    img.setAttribute("referrerpolicy", "no-referrer");
+    attachFallback(img);
   });
 };
 

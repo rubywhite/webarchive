@@ -232,6 +232,15 @@ function rewriteSrcset(value, baseUrl, timestamp, modifier) {
     .join(", ");
 }
 
+function escapeHtml(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 function cleanContent(html, baseUrl, timestamp) {
   const dom = new JSDOM(`<body>${html}</body>`, { url: baseUrl });
   const { document } = dom.window;
@@ -346,7 +355,7 @@ function cleanContent(html, baseUrl, timestamp) {
   return document.body.innerHTML;
 }
 
-function extractHeroImage(document, baseUrl, timestamp) {
+function extractHeroImageSource(document, baseUrl) {
   const selectors = [
     { selector: 'meta[property="og:image"]', attr: "content" },
     { selector: 'meta[property="og:image:url"]', attr: "content" },
@@ -364,18 +373,196 @@ function extractHeroImage(document, baseUrl, timestamp) {
     if (!value) continue;
     const absolute = absolutizeUrl(value, baseUrl);
     if (!isValidHttpUrl(absolute)) continue;
-    return buildArchiveUrl(absolute, timestamp, "im");
+    return absolute;
   }
   return null;
 }
 
-function prependHeroImage(contentHtml, heroUrl) {
+function normalizeUrlForCompare(value) {
+  const stripped = stripWaybackPrefix(value);
+  try {
+    const parsed = new URL(stripped);
+    parsed.hash = "";
+    parsed.search = "";
+    let path = parsed.pathname || "";
+    if (path !== "/") {
+      path = path.replace(/\/+$/, "");
+    }
+    return `${parsed.origin}${path}`.toLowerCase();
+  } catch (error) {
+    return stripped.toLowerCase();
+  }
+}
+
+function getUrlBasename(value) {
+  try {
+    const parsed = new URL(stripWaybackPrefix(value));
+    const last = parsed.pathname.split("/").filter(Boolean).pop();
+    return (last || "").toLowerCase();
+  } catch (error) {
+    return "";
+  }
+}
+
+function collectImageCandidatesFromNode(node) {
+  const values = [];
+  const directAttrs = [
+    "src",
+    "data-src",
+    "data-original",
+    "data-lazy-src",
+    "data-orig-src",
+    "content",
+  ];
+  directAttrs.forEach((attr) => {
+    const value = node.getAttribute(attr);
+    if (value) values.push(value);
+  });
+  const srcsetAttrs = [
+    "srcset",
+    "data-srcset",
+    "data-original-srcset",
+    "data-lazy-srcset",
+  ];
+  srcsetAttrs.forEach((attr) => {
+    const srcset = node.getAttribute(attr);
+    if (!srcset) return;
+    srcset
+      .split(",")
+      .map((part) => part.trim().split(/\s+/)[0])
+      .filter(Boolean)
+      .forEach((url) => values.push(url));
+  });
+  return values;
+}
+
+function extractFigureCaption(figure) {
+  if (!figure) return "";
+  const captionNode = figure.querySelector(
+    "figcaption, [itemprop='caption'], [class*='caption']"
+  );
+  return normalizeText(captionNode?.textContent || "");
+}
+
+function buildFigureCaptionIndex(document, baseUrl) {
+  const byNormalized = new Map();
+  const basenameCandidates = new Map();
+  let firstFigureImageUrl = "";
+
+  Array.from(document.querySelectorAll("figure")).forEach((figure) => {
+    const caption = extractFigureCaption(figure);
+    const imageNodes = figure.querySelectorAll("img, source, meta[itemprop='url']");
+    imageNodes.forEach((imageNode) => {
+      const candidates = collectImageCandidatesFromNode(imageNode);
+      candidates.forEach((candidate) => {
+        const absolute = absolutizeUrl(candidate, baseUrl);
+        if (!isValidHttpUrl(stripWaybackPrefix(absolute))) return;
+        if (!firstFigureImageUrl) {
+          firstFigureImageUrl = absolute;
+        }
+        if (!caption) return;
+        const normalized = normalizeUrlForCompare(absolute);
+        const basename = getUrlBasename(absolute);
+        if (normalized && !byNormalized.has(normalized)) {
+          byNormalized.set(normalized, caption);
+        }
+        if (basename) {
+          if (!basenameCandidates.has(basename)) {
+            basenameCandidates.set(basename, new Set());
+          }
+          basenameCandidates.get(basename).add(caption);
+        }
+      });
+    });
+  });
+
+  const byBasename = new Map();
+  basenameCandidates.forEach((captions, basename) => {
+    if (captions.size === 1) {
+      byBasename.set(basename, Array.from(captions)[0]);
+    }
+  });
+
+  return { byNormalized, byBasename, firstFigureImageUrl };
+}
+
+function findCaptionForUrl(value, baseUrl, captionIndex) {
+  if (!value || !captionIndex) return "";
+  const absolute = absolutizeUrl(value, baseUrl);
+  const normalized = normalizeUrlForCompare(absolute);
+  if (normalized && captionIndex.byNormalized.has(normalized)) {
+    return captionIndex.byNormalized.get(normalized);
+  }
+  const basename = getUrlBasename(absolute);
+  if (basename && captionIndex.byBasename.has(basename)) {
+    return captionIndex.byBasename.get(basename);
+  }
+  return "";
+}
+
+function findCaptionForFigure(figure, baseUrl, captionIndex) {
+  if (!figure || !captionIndex) return "";
+  const imageNodes = figure.querySelectorAll("img, source, meta[itemprop='url']");
+  for (const imageNode of imageNodes) {
+    const candidates = collectImageCandidatesFromNode(imageNode);
+    for (const candidate of candidates) {
+      const caption = findCaptionForUrl(candidate, baseUrl, captionIndex);
+      if (caption) return caption;
+    }
+  }
+  return "";
+}
+
+function enrichContentWithFigureCaptions(contentHtml, baseUrl, captionIndex) {
+  if (!contentHtml || !captionIndex) return contentHtml;
+  const dom = new JSDOM(`<body>${contentHtml}</body>`);
+  const { document } = dom.window;
+
+  document.querySelectorAll("figure").forEach((figure) => {
+    if (extractFigureCaption(figure)) return;
+    const caption = findCaptionForFigure(figure, baseUrl, captionIndex);
+    if (!caption) return;
+    const figcaption = document.createElement("figcaption");
+    figcaption.textContent = caption;
+    figure.appendChild(figcaption);
+  });
+
+  document.querySelectorAll("img").forEach((img) => {
+    if (img.closest("figure")) return;
+    const candidates = collectImageCandidatesFromNode(img);
+    for (const candidate of candidates) {
+      const caption = findCaptionForUrl(candidate, baseUrl, captionIndex);
+      if (!caption) continue;
+      const next = img.nextElementSibling;
+      if (next && normalizeText(next.textContent || "") === caption) {
+        break;
+      }
+      const paragraph = document.createElement("p");
+      paragraph.className = "image-caption";
+      paragraph.textContent = caption;
+      img.insertAdjacentElement("afterend", paragraph);
+      break;
+    }
+  });
+
+  return document.body.innerHTML;
+}
+
+function extractFeaturedImageCaption(baseUrl, featuredImageSource, captionIndex) {
+  if (!featuredImageSource) return "";
+  return findCaptionForUrl(featuredImageSource, baseUrl, captionIndex);
+}
+
+function prependHeroImage(contentHtml, heroUrl, heroCaption) {
   if (!heroUrl) return contentHtml;
   const strippedHero = stripWaybackPrefix(heroUrl);
   if (contentHtml.includes(heroUrl) || contentHtml.includes(strippedHero)) {
     return contentHtml;
   }
-  return `<figure class="reader-hero"><img src="${heroUrl}" alt="" /></figure>${contentHtml}`;
+  const captionMarkup = heroCaption
+    ? `<figcaption>${escapeHtml(heroCaption)}</figcaption>`
+    : "";
+  return `<figure class="reader-hero"><img src="${heroUrl}" alt="" />${captionMarkup}</figure>${contentHtml}`;
 }
 
 function stripInlineHandlers(document) {
@@ -618,7 +805,11 @@ exports.handler = async (event) => {
   const baseUrl = sourceUrl || archiveUrl;
   const dom = new JSDOM(html, { url: baseUrl });
   stripInlineHandlers(dom.window.document);
-  const heroImage = extractHeroImage(dom.window.document, baseUrl, timestamp);
+  const figureCaptionIndex = buildFigureCaptionIndex(dom.window.document, baseUrl);
+  const heroImageSource =
+    extractHeroImageSource(dom.window.document, baseUrl) || figureCaptionIndex.firstFigureImageUrl;
+  const heroImage = heroImageSource ? buildArchiveUrl(heroImageSource, timestamp, "im") : null;
+  const heroCaption = extractFeaturedImageCaption(baseUrl, heroImageSource, figureCaptionIndex);
   const publicationName =
     extractSiteName(dom.window.document) || fallbackSiteNameFromUrl(targetUrl);
   const publishedDate = extractPublishedDate(dom.window.document);
@@ -629,10 +820,9 @@ exports.handler = async (event) => {
     return json(500, { error: "Could not extract readable content from the archive." });
   }
 
-  const cleaned = prependHeroImage(
-    cleanContent(article.content, baseUrl, timestamp),
-    heroImage
-  );
+  let cleaned = cleanContent(article.content, baseUrl, timestamp);
+  cleaned = enrichContentWithFigureCaptions(cleaned, baseUrl, figureCaptionIndex);
+  cleaned = prependHeroImage(cleaned, heroImage, heroCaption);
 
   return json(200, {
     status: "archived",
