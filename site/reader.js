@@ -46,6 +46,40 @@ const normalizeShareText = (value, maxLength) => {
   return normalized.length > maxLength ? `${normalized.slice(0, maxLength - 3)}...` : normalized;
 };
 
+const formatPublishedDate = (value) => {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const dateOnly = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (dateOnly) {
+    const year = Number(dateOnly[1]);
+    const month = Number(dateOnly[2]);
+    const day = Number(dateOnly[3]);
+    const utcDate = new Date(Date.UTC(year, month - 1, day));
+    return new Intl.DateTimeFormat(undefined, {
+      year: "numeric",
+      month: "long",
+      day: "numeric",
+      timeZone: "UTC",
+    }).format(utcDate);
+  }
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) return "";
+  return new Intl.DateTimeFormat(undefined, {
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+  }).format(parsed);
+};
+
+const buildTitleMeta = ({ byline, excerpt, publishedDate }) => {
+  const parts = [];
+  const primary = String(byline || excerpt || "").trim();
+  const formattedDate = formatPublishedDate(publishedDate);
+  if (primary) parts.push(primary);
+  if (formattedDate) parts.push(`Published ${formattedDate}`);
+  return parts.join(" • ");
+};
+
 const buildShareUrl = ({ originalUrl: pageUrl, cacheKey, title, excerpt, image }) => {
   const target = new URL(cacheKey ? `/s/${encodeURIComponent(cacheKey)}` : "/s", window.location.origin);
   if (pageUrl) target.searchParams.set("url", pageUrl);
@@ -219,7 +253,11 @@ const applyPayload = (payload, { fromCache = false } = {}) => {
   if (headline) {
     document.title = headline;
   }
-  bylineEl.textContent = payload.byline || payload.excerpt || "";
+  bylineEl.textContent = buildTitleMeta({
+    byline: payload.byline,
+    excerpt: payload.excerpt,
+    publishedDate: payload.publishedDate,
+  });
   archiveLink.href = payload.archiveUrl;
   originalUrl.textContent = payload.originalUrl || "";
 
@@ -305,6 +343,7 @@ if (cached) {
         archiveSource: data.archiveSource,
         originalUrl: data.originalUrl,
         heroImage: data.heroImage,
+        publishedDate: data.publishedDate,
       };
 
       if (!cacheKey) {

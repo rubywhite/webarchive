@@ -89,6 +89,40 @@ const normalizeShareText = (value, maxLength) => {
   return normalized.length > maxLength ? `${normalized.slice(0, maxLength - 3)}...` : normalized;
 };
 
+const formatPublishedDate = (value) => {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const dateOnly = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (dateOnly) {
+    const year = Number(dateOnly[1]);
+    const month = Number(dateOnly[2]);
+    const day = Number(dateOnly[3]);
+    const utcDate = new Date(Date.UTC(year, month - 1, day));
+    return new Intl.DateTimeFormat(undefined, {
+      year: "numeric",
+      month: "long",
+      day: "numeric",
+      timeZone: "UTC",
+    }).format(utcDate);
+  }
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) return "";
+  return new Intl.DateTimeFormat(undefined, {
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+  }).format(parsed);
+};
+
+const buildTitleMeta = ({ byline, excerpt, publishedDate }) => {
+  const parts = [];
+  const primary = String(byline || excerpt || "").trim();
+  const formattedDate = formatPublishedDate(publishedDate);
+  if (primary) parts.push(primary);
+  if (formattedDate) parts.push(`Published ${formattedDate}`);
+  return parts.join(" • ");
+};
+
 const buildShareUrl = ({ originalUrl: pageUrl, cacheKey, title, excerpt, image }) => {
   const target = new URL(cacheKey ? `/s/${encodeURIComponent(cacheKey)}` : "/s", window.location.origin);
   if (pageUrl) target.searchParams.set("url", pageUrl);
@@ -282,7 +316,11 @@ const checkArchiveForUrl = async (url) => {
 
   setStatus("Archive found. Loading reader view...", "success");
   readerTitle.textContent = data.title || "Archived page";
-  readerByline.textContent = data.byline || data.excerpt || "";
+  readerByline.textContent = buildTitleMeta({
+    byline: data.byline,
+    excerpt: data.excerpt,
+    publishedDate: data.publishedDate,
+  });
   archiveLink.href = data.archiveUrl;
 
   const cachePayload = {
@@ -295,6 +333,7 @@ const checkArchiveForUrl = async (url) => {
     archiveSource: data.archiveSource,
     originalUrl: data.originalUrl,
     heroImage: data.heroImage,
+    publishedDate: data.publishedDate,
   };
   const cacheKey = buildCacheKey(cachePayload);
   saveCachePayload(cacheKey, cachePayload);
