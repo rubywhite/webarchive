@@ -1,3 +1,13 @@
 [build]
   publish = "site"
   functions = "netlify/functions"
+
+[[redirects]]
+  from = "/s/:cache"
+  to = "/.netlify/functions/share?cache=:cache"
+  status = 200
+
+[[redirects]]
+  from = "/s"
+  to = "/.netlify/functions/share"
+  status = 200

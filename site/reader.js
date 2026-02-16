@@ -40,6 +40,23 @@ const buildReaderUrl = (url, cacheKey) => {
   return target.toString();
 };
 
+const normalizeShareText = (value, maxLength) => {
+  const normalized = String(value || "").replace(/\s+/g, " ").trim();
+  if (!normalized) return "";
+  return normalized.length > maxLength ? `${normalized.slice(0, maxLength - 3)}...` : normalized;
+};
+
+const buildShareUrl = ({ originalUrl: pageUrl, cacheKey, title, excerpt, image }) => {
+  const target = new URL(cacheKey ? `/s/${encodeURIComponent(cacheKey)}` : "/s", window.location.origin);
+  if (pageUrl) target.searchParams.set("url", pageUrl);
+  const cleanTitle = normalizeShareText(title, 180);
+  const cleanExcerpt = normalizeShareText(excerpt, 280);
+  if (cleanTitle) target.searchParams.set("title", cleanTitle);
+  if (cleanExcerpt) target.searchParams.set("excerpt", cleanExcerpt);
+  if (image) target.searchParams.set("image", image);
+  return target.toString();
+};
+
 const loadCachePayload = (cacheKey) => {
   if (!cacheKey) return null;
   try {
@@ -63,9 +80,15 @@ const saveCachePayload = (cacheKey, payload) => {
   }
 };
 
-const updateShareButton = (url, cacheKey) => {
+const updateShareButton = (payload, cacheKey, fallbackUrl) => {
   if (!shareButton) return;
-  const shareUrl = buildReaderUrl(url, cacheKey);
+  const shareUrl = buildShareUrl({
+    originalUrl: payload?.originalUrl || fallbackUrl,
+    cacheKey,
+    title: payload?.title,
+    excerpt: payload?.excerpt || payload?.byline,
+    image: payload?.heroImage,
+  });
   shareButton.disabled = false;
   shareButton.dataset.url = shareUrl;
   shareButton.dataset.state = "";
@@ -227,7 +250,7 @@ let cacheKey = params.get("cache");
 const cached = cacheKey ? loadCachePayload(cacheKey) : null;
 if (cached) {
   applyPayload(cached, { fromCache: true });
-  updateShareButton(cached.originalUrl || url, cacheKey);
+  updateShareButton(cached, cacheKey, url);
 } else if (!url) {
   titleEl.textContent = "Missing URL";
   document.title = "Missing URL";
@@ -281,6 +304,7 @@ if (cached) {
         archiveTimestamp: data.archiveTimestamp,
         archiveSource: data.archiveSource,
         originalUrl: data.originalUrl,
+        heroImage: data.heroImage,
       };
 
       if (!cacheKey) {
@@ -289,7 +313,7 @@ if (cached) {
       saveCachePayload(cacheKey, payload);
 
       applyPayload(payload);
-      updateShareButton(payload.originalUrl || url, cacheKey);
+      updateShareButton(payload, cacheKey, url);
 
       const nextUrl = buildReaderUrl(payload.originalUrl || url, cacheKey);
       if (nextUrl && window.location.href !== nextUrl) {

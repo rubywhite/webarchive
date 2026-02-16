@@ -83,6 +83,23 @@ const buildReaderUrl = (url, cacheKey) => {
   return target.toString();
 };
 
+const normalizeShareText = (value, maxLength) => {
+  const normalized = String(value || "").replace(/\s+/g, " ").trim();
+  if (!normalized) return "";
+  return normalized.length > maxLength ? `${normalized.slice(0, maxLength - 3)}...` : normalized;
+};
+
+const buildShareUrl = ({ originalUrl: pageUrl, cacheKey, title, excerpt, image }) => {
+  const target = new URL(cacheKey ? `/s/${encodeURIComponent(cacheKey)}` : "/s", window.location.origin);
+  if (pageUrl) target.searchParams.set("url", pageUrl);
+  const cleanTitle = normalizeShareText(title, 180);
+  const cleanExcerpt = normalizeShareText(excerpt, 280);
+  if (cleanTitle) target.searchParams.set("title", cleanTitle);
+  if (cleanExcerpt) target.searchParams.set("excerpt", cleanExcerpt);
+  if (image) target.searchParams.set("image", image);
+  return target.toString();
+};
+
 const resetResult = () => {
   resultSection.classList.add("hidden");
   readerTitle.textContent = "";
@@ -277,16 +294,24 @@ const checkArchiveForUrl = async (url) => {
     archiveTimestamp: data.archiveTimestamp,
     archiveSource: data.archiveSource,
     originalUrl: data.originalUrl,
+    heroImage: data.heroImage,
   };
   const cacheKey = buildCacheKey(cachePayload);
   saveCachePayload(cacheKey, cachePayload);
 
   const readerUrl = buildReaderUrl(data.originalUrl, cacheKey);
+  const shareUrl = buildShareUrl({
+    originalUrl: data.originalUrl,
+    cacheKey,
+    title: data.title,
+    excerpt: data.excerpt || data.byline,
+    image: data.heroImage,
+  });
   readerLink.href = readerUrl;
   readerLink.textContent = "Open clean reader view";
   if (shareButton) {
     shareButton.disabled = false;
-    shareButton.dataset.url = readerUrl;
+    shareButton.dataset.url = shareUrl;
     shareButton.dataset.state = "";
   }
 
