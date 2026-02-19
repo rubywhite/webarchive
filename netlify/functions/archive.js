@@ -1,8 +1,31 @@
-const { JSDOM } = require("jsdom");
+const { JSDOM, VirtualConsole } = require("jsdom");
 const { Readability } = require("@mozilla/readability");
 
 const USER_AGENT = "WebArchive/1.0";
 const ARCHIVE_ORIGIN = "https://web.archive.org";
+const PARSE_HTML_MAX_LENGTH = 3_000_000;
+
+const JSDOM_VIRTUAL_CONSOLE = new VirtualConsole();
+JSDOM_VIRTUAL_CONSOLE.on("jsdomError", (error) => {
+  if (String(error?.message || "").includes("Could not parse CSS stylesheet")) {
+    return;
+  }
+  console.error(error);
+});
+
+function sanitizeHtmlForDom(html) {
+  if (!html) return "";
+  return String(html)
+    .slice(0, PARSE_HTML_MAX_LENGTH)
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, "");
+}
+
+function createDom(html, options = {}) {
+  return new JSDOM(sanitizeHtmlForDom(html), {
+    ...options,
+    virtualConsole: JSDOM_VIRTUAL_CONSOLE,
+  });
+}
 
 function json(statusCode, payload) {
   return {
@@ -57,7 +80,7 @@ function textLengthFromNode(node) {
 function textLengthFromHtml(html) {
   if (!html) return 0;
   try {
-    const dom = new JSDOM(`<body>${html}</body>`);
+    const dom = createDom(`<body>${html}</body>`);
     return textLengthFromNode(dom.window.document.body);
   } catch (error) {
     return 0;
@@ -236,6 +259,101 @@ function findDateInJsonLd(value) {
   return null;
 }
 
+function findLongestArticleBodyInJsonLd(value) {
+  if (!value) return "";
+  if (Array.isArray(value)) {
+    return value.reduce((best, item) => {
+      const candidate = findLongestArticleBodyInJsonLd(item);
+      return candidate.length > best.length ? candidate : best;
+    }, "");
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  if (typeof value !== "object") return "";
+
+  let best = "";
+  const directKeys = ["articleBody", "text", "body"];
+  directKeys.forEach((key) => {
+    const raw = value[key];
+    if (typeof raw === "string" && raw.length > best.length) {
+      best = raw;
+    } else if (raw && typeof raw === "object") {
+      const nested = findLongestArticleBodyInJsonLd(raw);
+      if (nested.length > best.length) {
+        best = nested;
+      }
+    }
+  });
+
+  if (value["@graph"]) {
+    const graphBody = findLongestArticleBodyInJsonLd(value["@graph"]);
+    if (graphBody.length > best.length) {
+      best = graphBody;
+    }
+  }
+
+  Object.keys(value).forEach((key) => {
+    if (directKeys.includes(key) || key === "@graph") return;
+    const nested = findLongestArticleBodyInJsonLd(value[key]);
+    if (nested.length > best.length) {
+      best = nested;
+    }
+  });
+
+  return best;
+}
+
+function articleBodyTextToHtml(text) {
+  const normalized = String(text || "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\s+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
+  if (!normalized) return "";
+
+  let blocks = normalized
+    .split(/\n{2,}/)
+    .map((part) => normalizeText(part))
+    .filter(Boolean);
+  if (blocks.length <= 1) {
+    blocks = normalized
+      .split(/\n+/)
+      .map((part) => normalizeText(part))
+      .filter(Boolean);
+  }
+  if (blocks.length === 0) return "";
+
+  return blocks.map((part) => `<p>${escapeHtml(part)}</p>`).join("");
+}
+
+function extractJsonLdArticleBodyHtml(document) {
+  if (!document) return "";
+  const scripts = Array.from(document.querySelectorAll('script[type="application/ld+json"]'));
+  let bestText = "";
+
+  scripts.forEach((script) => {
+    const raw = script.textContent || "";
+    if (!raw.trim()) return;
+    try {
+      const parsed = JSON.parse(raw);
+      const candidate = findLongestArticleBodyInJsonLd(parsed);
+      if (candidate.length > bestText.length) {
+        bestText = candidate;
+      }
+    } catch (error) {
+      // ignore invalid JSON-LD blocks
+    }
+  });
+
+  const normalizedLength = normalizeText(bestText).length;
+  if (normalizedLength < 1200) {
+    return "";
+  }
+  return articleBodyTextToHtml(bestText);
+}
+
 function extractPublishedDate(document) {
   const metaSelectors = [
     { selector: 'meta[property="article:published_time"]', attr: "content" },
@@ -385,7 +503,7 @@ function escapeHtml(value) {
 }
 
 function cleanContent(html, baseUrl, timestamp) {
-  const dom = new JSDOM(`<body>${html}</body>`, { url: baseUrl });
+  const dom = createDom(`<body>${html}</body>`, { url: baseUrl });
   const { document } = dom.window;
 
   document.querySelectorAll("noscript").forEach((el) => {
@@ -658,7 +776,7 @@ function findCaptionForFigure(figure, baseUrl, captionIndex) {
 
 function enrichContentWithFigureCaptions(contentHtml, baseUrl, captionIndex) {
   if (!contentHtml || !captionIndex) return contentHtml;
-  const dom = new JSDOM(`<body>${contentHtml}</body>`);
+  const dom = createDom(`<body>${contentHtml}</body>`);
   const { document } = dom.window;
 
   document.querySelectorAll("figure").forEach((figure) => {
@@ -770,35 +888,41 @@ async function fetchArchiveHtmlCandidates(archiveUrl, targetUrl, timestamp) {
   return { candidates: htmlCandidates };
 }
 
-async function lookupCdxSnapshot(targetUrl) {
+async function lookupCdxSnapshots(targetUrl, limit = 5) {
+  const safeLimit = Math.max(1, Math.min(Number(limit) || 5, 8));
   const cdxUrl = `https://web.archive.org/cdx/search/cdx?url=${encodeURIComponent(
     targetUrl
-  )}&output=json&fl=timestamp,original,statuscode&filter=statuscode:200&limit=1&sort=descending`;
+  )}&output=json&fl=timestamp,original,statuscode&filter=statuscode:200&limit=${safeLimit}&sort=descending`;
 
   try {
     const response = await fetch(cdxUrl, {
       headers: { "User-Agent": USER_AGENT },
     });
     if (!response.ok) {
-      return null;
+      return [];
     }
     const data = await response.json();
     if (!Array.isArray(data) || data.length < 2) {
-      return null;
+      return [];
     }
-    const row = data[1];
-    const timestamp = row[0];
-    const original = row[1] || targetUrl;
-    if (!timestamp) {
-      return null;
-    }
-    return {
-      url: buildArchiveUrl(original, timestamp, null),
-      timestamp,
-      original,
-    };
+    const snapshots = [];
+    const seen = new Set();
+    data.slice(1).forEach((row) => {
+      const timestamp = row?.[0];
+      const original = row?.[1] || targetUrl;
+      if (!timestamp) return;
+      const key = `${timestamp}|${original}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      snapshots.push({
+        url: buildArchiveUrl(original, timestamp, null),
+        timestamp,
+        original,
+      });
+    });
+    return snapshots;
   } catch (error) {
-    return null;
+    return [];
   }
 }
 
@@ -853,7 +977,7 @@ function classifySaveFailure(status, detail) {
 
 function extractFromHtmlCandidate({ html, sourceUrl, variant, targetUrl, timestamp }) {
   const baseUrl = sourceUrl || targetUrl;
-  const dom = new JSDOM(html, { url: baseUrl });
+  const dom = createDom(html, { url: baseUrl });
   const document = dom.window.document;
 
   const sourceArticleLength = pickLikelySourceArticleLength(document);
@@ -867,14 +991,7 @@ function extractFromHtmlCandidate({ html, sourceUrl, variant, targetUrl, timesta
   const heroCaption = extractFeaturedImageCaption(baseUrl, heroImageSource, figureCaptionIndex);
   const publicationName = extractSiteName(document) || fallbackSiteNameFromUrl(targetUrl);
   const publishedDate = extractPublishedDate(document);
-  let fallbackHtml = "";
-  try {
-    const fallbackDom = new JSDOM(html, { url: baseUrl });
-    stripInlineHandlers(fallbackDom.window.document);
-    fallbackHtml = buildFallbackContentHtml(fallbackDom.window.document, baseUrl, timestamp);
-  } catch (error) {
-    fallbackHtml = "";
-  }
+  const jsonLdBodyHtml = extractJsonLdArticleBodyHtml(document);
 
   const reader = new Readability(document);
   const article = reader.parse();
@@ -887,22 +1004,48 @@ function extractFromHtmlCandidate({ html, sourceUrl, variant, targetUrl, timesta
   cleaned = prependHeroImage(cleaned, heroImage, heroCaption);
 
   let extractedTextLength = textLengthFromHtml(cleaned);
+  const shouldTryFallback =
+    extractedTextLength < 4500 ||
+    (sourceArticleLength > 0 && extractedTextLength < sourceArticleLength * 0.75);
 
-  if (fallbackHtml) {
-    let enrichedFallback = enrichContentWithFigureCaptions(
-      fallbackHtml,
-      baseUrl,
-      figureCaptionIndex
-    );
-    enrichedFallback = prependHeroImage(enrichedFallback, heroImage, heroCaption);
-    const fallbackLength = textLengthFromHtml(enrichedFallback);
-    const fallbackIsStronger =
-      fallbackLength >= 1200 &&
-      fallbackLength > extractedTextLength * 1.2 &&
-      fallbackLength - extractedTextLength >= 800;
-    if (fallbackIsStronger) {
-      cleaned = enrichedFallback;
-      extractedTextLength = fallbackLength;
+  if (shouldTryFallback) {
+    let fallbackHtml = "";
+    try {
+      const fallbackDom = createDom(html, { url: baseUrl });
+      stripInlineHandlers(fallbackDom.window.document);
+      fallbackHtml = buildFallbackContentHtml(fallbackDom.window.document, baseUrl, timestamp);
+    } catch (error) {
+      fallbackHtml = "";
+    }
+
+    if (fallbackHtml) {
+      let enrichedFallback = enrichContentWithFigureCaptions(
+        fallbackHtml,
+        baseUrl,
+        figureCaptionIndex
+      );
+      enrichedFallback = prependHeroImage(enrichedFallback, heroImage, heroCaption);
+      const fallbackLength = textLengthFromHtml(enrichedFallback);
+      const fallbackIsStronger =
+        fallbackLength >= 1200 &&
+        fallbackLength > extractedTextLength * 1.2 &&
+        fallbackLength - extractedTextLength >= 800;
+      if (fallbackIsStronger) {
+        cleaned = enrichedFallback;
+        extractedTextLength = fallbackLength;
+      }
+    }
+  }
+
+  if (jsonLdBodyHtml) {
+    const jsonLdLength = textLengthFromHtml(jsonLdBodyHtml);
+    const jsonLdIsStronger =
+      jsonLdLength >= 1200 &&
+      jsonLdLength > extractedTextLength * 1.3 &&
+      jsonLdLength - extractedTextLength >= 900;
+    if (jsonLdIsStronger) {
+      cleaned = prependHeroImage(jsonLdBodyHtml, heroImage, heroCaption);
+      extractedTextLength = textLengthFromHtml(cleaned);
     }
   }
 
@@ -933,31 +1076,60 @@ function extractFromHtmlCandidate({ html, sourceUrl, variant, targetUrl, timesta
   };
 }
 
+function compareExtractionQuality(left, right) {
+  if (!left && !right) return 0;
+  if (!left) return 1;
+  if (!right) return -1;
+
+  const leftLength = left._quality?.extractedTextLength || 0;
+  const rightLength = right._quality?.extractedTextLength || 0;
+  const maxLength = Math.max(leftLength, rightLength);
+  const minLength = Math.min(leftLength, rightLength);
+  const lengthRatio = minLength > 0 ? maxLength / minLength : maxLength > 0 ? Infinity : 1;
+  const lengthDelta = Math.abs(rightLength - leftLength);
+  // If one extraction is substantially longer, prefer it even if warning heuristics differ.
+  if (lengthRatio >= 1.25 && lengthDelta >= 1200) {
+    return rightLength - leftLength;
+  }
+
+  const leftWarning = left._quality?.hasWarning ? 1 : 0;
+  const rightWarning = right._quality?.hasWarning ? 1 : 0;
+  if (leftWarning !== rightWarning) return leftWarning - rightWarning;
+  if (leftLength !== rightLength) return rightLength - leftLength;
+
+  const leftCoverage = left._quality?.coverage || 0;
+  const rightCoverage = right._quality?.coverage || 0;
+  if (leftCoverage !== rightCoverage) {
+    return rightCoverage - leftCoverage;
+  }
+
+  return 0;
+}
+
 function chooseBestExtraction(results) {
   if (!Array.isArray(results) || results.length === 0) return null;
-  return results
-    .slice()
-    .sort((left, right) => {
-      const leftLength = left._quality?.extractedTextLength || 0;
-      const rightLength = right._quality?.extractedTextLength || 0;
-      const maxLength = Math.max(leftLength, rightLength);
-      const minLength = Math.min(leftLength, rightLength);
-      const lengthRatio = minLength > 0 ? maxLength / minLength : maxLength > 0 ? Infinity : 1;
-      const lengthDelta = Math.abs(rightLength - leftLength);
-      // If one extraction is substantially longer, prefer it even if warning heuristics differ.
-      if (lengthRatio >= 1.25 && lengthDelta >= 1200) {
-        return rightLength - leftLength;
-      }
+  return results.reduce((best, candidate) => {
+    if (!best) return candidate;
+    return compareExtractionQuality(candidate, best) < 0 ? candidate : best;
+  }, null);
+}
 
-      const leftWarning = left._quality?.hasWarning ? 1 : 0;
-      const rightWarning = right._quality?.hasWarning ? 1 : 0;
-      if (leftWarning !== rightWarning) return leftWarning - rightWarning;
-      if (leftLength !== rightLength) return rightLength - leftLength;
+function timestampToNumber(value) {
+  if (!value) return 0;
+  const digits = String(value).match(/\d{14}/);
+  if (!digits) return 0;
+  return Number(digits[0]) || 0;
+}
 
-      const leftCoverage = left._quality?.coverage || 0;
-      const rightCoverage = right._quality?.coverage || 0;
-      return rightCoverage - leftCoverage;
-    })[0];
+function chooseBestResolvedPage(left, right) {
+  if (!left) return right;
+  if (!right) return left;
+  const qualityOrder = compareExtractionQuality(right.extraction, left.extraction);
+  if (qualityOrder < 0) return right;
+  if (qualityOrder > 0) return left;
+  return timestampToNumber(right.archiveTimestamp) > timestampToNumber(left.archiveTimestamp)
+    ? right
+    : left;
 }
 
 exports.handler = async (event) => {
@@ -993,24 +1165,23 @@ exports.handler = async (event) => {
   }
 
   const closest = availability?.archived_snapshots?.closest;
+  const cdxSnapshots = await lookupCdxSnapshots(targetUrl, 5);
 
-  let snapshot = null;
-  let archiveSource = null;
+  let primarySnapshot = null;
+  let primarySource = null;
   if (closest?.url) {
-    snapshot = {
+    primarySnapshot = {
       url: closest.url,
       timestamp: closest.timestamp,
       original: closest.original || targetUrl,
     };
-    archiveSource = "availability";
-  } else {
-    snapshot = await lookupCdxSnapshot(targetUrl);
-    if (snapshot) {
-      archiveSource = "cdx";
-    }
+    primarySource = "availability";
+  } else if (cdxSnapshots.length > 0) {
+    primarySnapshot = cdxSnapshots[0];
+    primarySource = "cdx";
   }
 
-  if (!snapshot) {
+  if (!primarySnapshot) {
     let archiveUrl = null;
     let submission = null;
     try {
@@ -1061,44 +1232,95 @@ exports.handler = async (event) => {
     });
   }
 
-  const archiveUrl = snapshot.url;
-  const timestamp = extractTimestamp(archiveUrl, snapshot.timestamp);
-
-  const { candidates, error } = await fetchArchiveHtmlCandidates(archiveUrl, targetUrl, timestamp);
-  if (!candidates || !candidates.length) {
-    return json(502, {
-      error: "Failed to fetch the archived page.",
-      details: error,
+  const snapshotCandidates = [];
+  const seenSnapshots = new Set();
+  const pushSnapshotCandidate = (snapshotEntry, source) => {
+    if (!snapshotEntry?.url) return;
+    const key = `${extractTimestamp(snapshotEntry.url, snapshotEntry.timestamp)}|${
+      snapshotEntry.original || targetUrl
+    }`;
+    if (seenSnapshots.has(key)) return;
+    seenSnapshots.add(key);
+    snapshotCandidates.push({
+      snapshot: snapshotEntry,
+      archiveSource: source,
     });
+  };
+
+  pushSnapshotCandidate(primarySnapshot, primarySource);
+  cdxSnapshots.forEach((snapshotEntry) => {
+    if (snapshotCandidates.length >= 3) return;
+    pushSnapshotCandidate(snapshotEntry, "cdx");
+  });
+
+  let resolvedPage = null;
+  let lastFetchError = null;
+  for (const item of snapshotCandidates) {
+    const archiveUrl = item.snapshot.url;
+    const timestamp = extractTimestamp(archiveUrl, item.snapshot.timestamp);
+    const { candidates, error } = await fetchArchiveHtmlCandidates(archiveUrl, targetUrl, timestamp);
+    if (!candidates || !candidates.length) {
+      if (error) {
+        lastFetchError = error;
+      }
+      continue;
+    }
+
+    const extractedCandidates = candidates
+      .map((candidate) =>
+        extractFromHtmlCandidate({
+          html: candidate.html,
+          sourceUrl: candidate.sourceUrl,
+          variant: candidate.variant,
+          targetUrl,
+          timestamp,
+        })
+      )
+      .filter(Boolean);
+
+    const best = chooseBestExtraction(extractedCandidates);
+    if (!best) {
+      continue;
+    }
+
+    resolvedPage = chooseBestResolvedPage(resolvedPage, {
+      extraction: best,
+      archiveUrl,
+      archiveTimestamp: timestamp,
+      archiveSource: item.archiveSource,
+    });
+
+    const chosenQuality = resolvedPage?.extraction?._quality;
+    if (
+      chosenQuality &&
+      !chosenQuality.hasWarning &&
+      (chosenQuality.extractedTextLength || 0) >= 6000
+    ) {
+      break;
+    }
   }
 
-  const extractedCandidates = candidates
-    .map((candidate) =>
-      extractFromHtmlCandidate({
-        html: candidate.html,
-        sourceUrl: candidate.sourceUrl,
-        variant: candidate.variant,
-        targetUrl,
-        timestamp,
-      })
-    )
-    .filter(Boolean);
-
-  const best = chooseBestExtraction(extractedCandidates);
-  if (!best) {
-    return json(500, { error: "Could not extract readable content from the archive." });
+  if (!resolvedPage) {
+    if (lastFetchError) {
+      return json(502, {
+        error: "Failed to fetch the archived page.",
+        details: lastFetchError,
+      });
+    }
+    return json(500, { error: "Could not extract readable content from archived snapshots." });
   }
 
+  const best = resolvedPage.extraction;
   return json(200, {
     status: "archived",
     originalUrl: targetUrl,
-    archiveUrl,
+    archiveUrl: resolvedPage.archiveUrl,
     title: best.title,
     byline: best.byline,
     excerpt: best.excerpt,
     contentHtml: best.contentHtml,
-    archiveSource,
-    archiveTimestamp: timestamp,
+    archiveSource: resolvedPage.archiveSource,
+    archiveTimestamp: resolvedPage.archiveTimestamp,
     heroImage: best.heroImage,
     publicationName: best.publicationName,
     publishedDate: best.publishedDate,

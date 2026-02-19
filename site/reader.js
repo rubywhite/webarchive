@@ -9,6 +9,7 @@ const shareButton = document.getElementById("share-button");
 const readerWarning = document.getElementById("reader-warning");
 
 const CACHE_PREFIX = "webArchiveCache:";
+const CACHE_VERSION = "v2";
 
 const setStatus = (message, type = "info") => {
   statusEl.textContent = message || "";
@@ -16,7 +17,7 @@ const setStatus = (message, type = "info") => {
 };
 
 const buildCacheKey = (payload) => {
-  const seed = `${payload.archiveTimestamp || ""}|${payload.originalUrl || ""}`;
+  const seed = `${CACHE_VERSION}|${payload.archiveTimestamp || ""}|${payload.originalUrl || ""}`;
   let hash = 2166136261;
   for (let i = 0; i < seed.length; i += 1) {
     hash ^= seed.charCodeAt(i);
