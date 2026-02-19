@@ -49,6 +49,71 @@ function normalizeText(value) {
   return String(value || "").replace(/\s+/g, " ").trim();
 }
 
+function textLengthFromNode(node) {
+  if (!node) return 0;
+  return normalizeText(node.textContent || "").length;
+}
+
+function textLengthFromHtml(html) {
+  if (!html) return 0;
+  try {
+    const dom = new JSDOM(`<body>${html}</body>`);
+    return textLengthFromNode(dom.window.document.body);
+  } catch (error) {
+    return 0;
+  }
+}
+
+function pickLikelySourceArticleLength(document) {
+  if (!document) return 0;
+  const selectors = [
+    "article",
+    "[itemprop='articleBody']",
+    "[data-testid*='article']",
+    "main",
+  ];
+
+  let maxLength = 0;
+  selectors.forEach((selector) => {
+    document.querySelectorAll(selector).forEach((node) => {
+      const length = textLengthFromNode(node);
+      if (length > maxLength) {
+        maxLength = length;
+      }
+    });
+  });
+
+  return maxLength;
+}
+
+function buildExtractionWarning({
+  extractedTextLength,
+  sourceArticleLength,
+  sourceBodyLength,
+}) {
+  const sourceLength = Math.max(sourceArticleLength || 0, sourceBodyLength || 0);
+  if (!extractedTextLength || !sourceLength) return null;
+
+  const coverage = extractedTextLength / sourceLength;
+  const missingChars = sourceLength - extractedTextLength;
+  const likelyIncomplete =
+    sourceLength >= 3500 &&
+    extractedTextLength >= 800 &&
+    coverage < 0.58 &&
+    missingChars > 1800;
+
+  if (!likelyIncomplete) return null;
+
+  return {
+    kind: "possibly_incomplete",
+    message:
+      "This clean view may be incomplete. Compare with the Wayback snapshot link for the full page.",
+    coverage: Number(coverage.toFixed(3)),
+    extractedTextLength,
+    sourceTextLength: sourceLength,
+  };
+}
+
 function toDateOnly(value) {
   if (!value) return null;
   const date = new Date(value);
@@ -823,6 +888,14 @@ exports.handler = async (event) => {
   let cleaned = cleanContent(article.content, baseUrl, timestamp);
   cleaned = enrichContentWithFigureCaptions(cleaned, baseUrl, figureCaptionIndex);
   cleaned = prependHeroImage(cleaned, heroImage, heroCaption);
+  const extractedTextLength = textLengthFromHtml(cleaned);
+  const sourceArticleLength = pickLikelySourceArticleLength(dom.window.document);
+  const sourceBodyLength = textLengthFromNode(dom.window.document.body);
+  const extractionWarning = buildExtractionWarning({
+    extractedTextLength,
+    sourceArticleLength,
+    sourceBodyLength,
+  });
 
   return json(200, {
     status: "archived",
@@ -837,5 +910,6 @@ exports.handler = async (event) => {
     heroImage,
     publicationName,
     publishedDate,
+    extractionWarning,
   });
 };

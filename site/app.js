@@ -10,6 +10,7 @@ const shareButton = document.getElementById("share-button");
 const archiveSource = document.getElementById("archive-source");
 const originalUrl = document.getElementById("original-url");
 const readerContent = document.getElementById("reader-content");
+const readerWarning = document.getElementById("reader-warning");
 
 const CACHE_PREFIX = "webArchiveCache:";
 const CACHE_INDEX_KEY = "webArchiveCacheIndex";
@@ -123,6 +124,18 @@ const buildTitleMeta = ({ byline, excerpt, publishedDate }) => {
   return parts.join(" • ");
 };
 
+const setReaderWarning = (warning) => {
+  if (!readerWarning) return;
+  const message = String(warning?.message || "").trim();
+  if (!message) {
+    readerWarning.textContent = "";
+    readerWarning.classList.add("hidden");
+    return;
+  }
+  readerWarning.textContent = message;
+  readerWarning.classList.remove("hidden");
+};
+
 const buildShareUrl = ({ originalUrl: pageUrl, cacheKey, title, excerpt, image }) => {
   const target = new URL(cacheKey ? `/s/${encodeURIComponent(cacheKey)}` : "/s", window.location.origin);
   if (pageUrl) target.searchParams.set("url", pageUrl);
@@ -152,6 +165,7 @@ const resetResult = () => {
   }
   originalUrl.textContent = "";
   readerContent.innerHTML = "";
+  setReaderWarning(null);
 };
 
 const fixImagesInContainer = (container, timestamp) => {
@@ -334,6 +348,7 @@ const checkArchiveForUrl = async (url) => {
     originalUrl: data.originalUrl,
     heroImage: data.heroImage,
     publishedDate: data.publishedDate,
+    extractionWarning: data.extractionWarning,
   };
   const cacheKey = buildCacheKey(cachePayload);
   saveCachePayload(cacheKey, cachePayload);
@@ -368,6 +383,7 @@ const checkArchiveForUrl = async (url) => {
   originalUrl.textContent = data.originalUrl;
   readerContent.innerHTML = data.contentHtml;
   fixImagesInContainer(readerContent, data.archiveTimestamp);
+  setReaderWarning(data.extractionWarning);
   resultSection.classList.remove("hidden");
 };
 

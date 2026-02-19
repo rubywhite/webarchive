@@ -6,6 +6,7 @@ const originalUrl = document.getElementById("original-url");
 const contentEl = document.getElementById("reader-content");
 const statusEl = document.getElementById("reader-status");
 const shareButton = document.getElementById("share-button");
+const readerWarning = document.getElementById("reader-warning");
 
 const CACHE_PREFIX = "webArchiveCache:";
 
@@ -78,6 +79,18 @@ const buildTitleMeta = ({ byline, excerpt, publishedDate }) => {
   if (primary) parts.push(primary);
   if (formattedDate) parts.push(`Published ${formattedDate}`);
   return parts.join(" • ");
+};
+
+const setReaderWarning = (warning) => {
+  if (!readerWarning) return;
+  const message = String(warning?.message || "").trim();
+  if (!message) {
+    readerWarning.textContent = "";
+    readerWarning.classList.add("hidden");
+    return;
+  }
+  readerWarning.textContent = message;
+  readerWarning.classList.remove("hidden");
 };
 
 const buildShareUrl = ({ originalUrl: pageUrl, cacheKey, title, excerpt, image }) => {
@@ -274,6 +287,7 @@ const applyPayload = (payload, { fromCache = false } = {}) => {
 
   contentEl.innerHTML = payload.contentHtml || "";
   fixImages(contentEl, payload.archiveTimestamp);
+  setReaderWarning(payload.extractionWarning);
   if (fromCache) {
     setStatus("Loaded from cache.", "success");
   } else {
@@ -344,6 +358,7 @@ if (cached) {
         originalUrl: data.originalUrl,
         heroImage: data.heroImage,
         publishedDate: data.publishedDate,
+        extractionWarning: data.extractionWarning,
       };
 
       if (!cacheKey) {
