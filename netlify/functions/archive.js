@@ -1221,23 +1221,100 @@ async function resolveSnapshotCandidate(snapshotEntry, archiveSource, targetUrl)
   };
 }
 
-exports.handler = async (event) => {
-  if (event.httpMethod !== "GET") {
-    return json(405, { error: "Method not allowed" });
-  }
+function isLikelyIpHost(hostname) {
+  if (!hostname) return false;
+  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(hostname)) return true;
+  if (hostname.includes(":")) return true;
+  return false;
+}
 
-  const rawUrl = (event.queryStringParameters?.url || "").trim();
-  if (!rawUrl) {
-    return json(400, { error: "Missing url parameter." });
-  }
+function canToggleWww(hostname) {
+  if (!hostname) return false;
+  if (hostname === "localhost" || hostname.endsWith(".localhost")) return false;
+  if (isLikelyIpHost(hostname)) return false;
+  return hostname.includes(".");
+}
 
-  const parsed = isHttpUrl(rawUrl);
-  if (!parsed) {
-    return json(400, { error: "Please provide a valid http or https URL." });
+function toggleWwwForUrl(url) {
+  try {
+    const parsed = new URL(url);
+    if (!canToggleWww(parsed.hostname)) return null;
+    parsed.hostname = parsed.hostname.startsWith("www.")
+      ? parsed.hostname.slice(4)
+      : `www.${parsed.hostname}`;
+    return parsed.toString();
+  } catch (error) {
+    return null;
   }
-  parsed.hash = "";
-  const targetUrl = parsed.href;
+}
 
+function toggleTrailingSlashForUrl(url) {
+  try {
+    const parsed = new URL(url);
+    if (parsed.pathname === "/") return null;
+    parsed.pathname = parsed.pathname.endsWith("/")
+      ? parsed.pathname.slice(0, -1) || "/"
+      : `${parsed.pathname}/`;
+    return parsed.toString();
+  } catch (error) {
+    return null;
+  }
+}
+
+function buildTargetUrlVariants(targetUrl) {
+  const candidates = [
+    targetUrl,
+    toggleTrailingSlashForUrl(targetUrl),
+    toggleWwwForUrl(targetUrl),
+  ];
+  const slashThenWww = candidates[1] ? toggleWwwForUrl(candidates[1]) : null;
+  const wwwThenSlash = candidates[2] ? toggleTrailingSlashForUrl(candidates[2]) : null;
+  candidates.push(slashThenWww, wwwThenSlash);
+
+  const variants = [];
+  const seen = new Set();
+  candidates.forEach((candidate) => {
+    if (!candidate || seen.has(candidate)) return;
+    seen.add(candidate);
+    variants.push(candidate);
+  });
+  return variants;
+}
+
+function scoreFallbackResult(statusCode, payload, variantIndex) {
+  const status = payload?.status;
+  let score = 100;
+  if (statusCode === 200 && status === "submitted") {
+    score = 500;
+  } else if (statusCode === 200 && status === "blocked") {
+    score = 450;
+  } else if (statusCode === 200 && status) {
+    score = 400;
+  } else if (statusCode === 502) {
+    score = 300;
+  } else if (statusCode === 500) {
+    score = 250;
+  } else if (statusCode >= 400 && statusCode < 500) {
+    score = 200;
+  }
+  return score - variantIndex;
+}
+
+function decorateVariantResponse(result, requestedUrl, resolvedUrl) {
+  const payload = { ...(result.payload || {}) };
+  if (result.statusCode === 200) {
+    payload.originalUrl = requestedUrl;
+    if (resolvedUrl && resolvedUrl !== requestedUrl) {
+      payload.resolvedUrl = resolvedUrl;
+    }
+  }
+  return {
+    statusCode: result.statusCode,
+    payload,
+  };
+}
+
+async function resolveArchiveForTarget(targetUrl, { allowSaveSubmission = true } = {}) {
   const availabilityUrl = `https://archive.org/wayback/available?url=${encodeURIComponent(targetUrl)}`;
 
   let availability;
@@ -1246,11 +1323,17 @@ exports.handler = async (event) => {
       headers: { "User-Agent": USER_AGENT },
     });
     if (!availabilityRes.ok) {
-      return json(502, { error: "Wayback availability check failed." });
+      return {
+        statusCode: 502,
+        payload: { error: "Wayback availability check failed." },
+      };
     }
     availability = await availabilityRes.json();
   } catch (error) {
-    return json(502, { error: "Wayback availability check failed." });
+    return {
+      statusCode: 502,
+      payload: { error: "Wayback availability check failed." },
+    };
   }
 
   const closest = availability?.archived_snapshots?.closest;
@@ -1274,6 +1357,13 @@ exports.handler = async (event) => {
   }
 
   if (!primarySnapshot) {
+    if (!allowSaveSubmission) {
+      return {
+        statusCode: 404,
+        payload: { error: "No archived snapshot found for this URL variant." },
+      };
+    }
+
     let archiveUrl = null;
     let submission = null;
     try {
@@ -1307,21 +1397,27 @@ exports.handler = async (event) => {
     }
 
     if (submission) {
-      return json(200, {
-        status: "blocked",
-        originalUrl: targetUrl,
-        archiveUrl,
-        submission,
-        message: "Wayback could not archive this URL.",
-      });
+      return {
+        statusCode: 200,
+        payload: {
+          status: "blocked",
+          originalUrl: targetUrl,
+          archiveUrl,
+          submission,
+          message: "Wayback could not archive this URL.",
+        },
+      };
     }
 
-    return json(200, {
-      status: "submitted",
-      originalUrl: targetUrl,
-      archiveUrl,
-      message: "This URL was not archived yet. A request to archive it has been submitted.",
-    });
+    return {
+      statusCode: 200,
+      payload: {
+        status: "submitted",
+        originalUrl: targetUrl,
+        archiveUrl,
+        message: "This URL was not archived yet. A request to archive it has been submitted.",
+      },
+    };
   }
 
   const processedSnapshots = new Set();
@@ -1366,29 +1462,80 @@ exports.handler = async (event) => {
 
   if (!resolvedPage) {
     if (lastFetchError) {
-      return json(502, {
-        error: "Failed to fetch the archived page.",
-        details: lastFetchError,
-      });
+      return {
+        statusCode: 502,
+        payload: {
+          error: "Failed to fetch the archived page.",
+          details: lastFetchError,
+        },
+      };
     }
-    return json(500, { error: "Could not extract readable content from archived snapshots." });
+    return {
+      statusCode: 500,
+      payload: { error: "Could not extract readable content from archived snapshots." },
+    };
   }
 
   const best = resolvedPage.extraction;
-  return json(200, {
-    status: "archived",
-    originalUrl: targetUrl,
-    archiveUrl: resolvedPage.archiveUrl,
-    title: best.title,
-    byline: best.byline,
-    excerpt: best.excerpt,
-    contentHtml: best.contentHtml,
-    archiveSource: resolvedPage.archiveSource,
-    archiveTimestamp: resolvedPage.archiveTimestamp,
-    heroImage: best.heroImage,
-    publicationName: best.publicationName,
-    publishedDate: best.publishedDate,
-    extractionWarning: best.extractionWarning,
-    extractionSource: best.extractionSource,
-  });
+  return {
+    statusCode: 200,
+    payload: {
+      status: "archived",
+      originalUrl: targetUrl,
+      archiveUrl: resolvedPage.archiveUrl,
+      title: best.title,
+      byline: best.byline,
+      excerpt: best.excerpt,
+      contentHtml: best.contentHtml,
+      archiveSource: resolvedPage.archiveSource,
+      archiveTimestamp: resolvedPage.archiveTimestamp,
+      heroImage: best.heroImage,
+      publicationName: best.publicationName,
+      publishedDate: best.publishedDate,
+      extractionWarning: best.extractionWarning,
+      extractionSource: best.extractionSource,
+    },
+  };
+}
+
+exports.handler = async (event) => {
+  if (event.httpMethod !== "GET") {
+    return json(405, { error: "Method not allowed" });
+  }
+
+  const rawUrl = (event.queryStringParameters?.url || "").trim();
+  if (!rawUrl) {
+    return json(400, { error: "Missing url parameter." });
+  }
+
+  const parsed = isHttpUrl(rawUrl);
+  if (!parsed) {
+    return json(400, { error: "Please provide a valid http or https URL." });
+  }
+  parsed.hash = "";
+  const requestedUrl = parsed.href;
+
+  const variants = buildTargetUrlVariants(requestedUrl);
+  let bestFallback = null;
+
+  for (let index = 0; index < variants.length; index += 1) {
+    const variantUrl = variants[index];
+    const attempt = await resolveArchiveForTarget(variantUrl, {
+      allowSaveSubmission: index === 0,
+    });
+    const decorated = decorateVariantResponse(attempt, requestedUrl, variantUrl);
+    if (decorated.statusCode === 200 && decorated.payload?.status === "archived") {
+      return json(200, decorated.payload);
+    }
+
+    const score = scoreFallbackResult(decorated.statusCode, decorated.payload, index);
+    if (!bestFallback || score > bestFallback.score) {
+      bestFallback = { score, result: decorated };
+    }
+  }
+
+  if (!bestFallback) {
+    return json(502, { error: "Wayback availability check failed." });
+  }
+  return json(bestFallback.result.statusCode, bestFallback.result.payload);
 };
