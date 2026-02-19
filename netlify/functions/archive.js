@@ -86,12 +86,74 @@ function pickLikelySourceArticleLength(document) {
   return maxLength;
 }
 
+function pickLikelySourceContentNode(document) {
+  if (!document) return null;
+  const primarySelectors = [
+    "[itemprop='articleBody']",
+    "article",
+    "[data-testid*='article']",
+    "main article",
+  ];
+  let bestNode = null;
+  let bestLength = 0;
+  primarySelectors.forEach((selector) => {
+    document.querySelectorAll(selector).forEach((node) => {
+      const length = textLengthFromNode(node);
+      if (length > bestLength) {
+        bestLength = length;
+        bestNode = node;
+      }
+    });
+  });
+
+  if (bestNode) return bestNode;
+
+  document.querySelectorAll("main").forEach((node) => {
+    const length = textLengthFromNode(node);
+    if (length > bestLength) {
+      bestLength = length;
+      bestNode = node;
+    }
+  });
+
+  return bestNode;
+}
+
+function buildFallbackContentHtml(document, baseUrl, timestamp) {
+  const node = pickLikelySourceContentNode(document);
+  if (!node) return "";
+
+  const clone = node.cloneNode(true);
+  clone
+    .querySelectorAll(
+      [
+        "script",
+        "style",
+        "noscript",
+        "iframe",
+        "form",
+        "aside",
+        "nav",
+        "footer",
+        "[aria-hidden='true']",
+        "[class*='newsletter']",
+        "[class*='subscribe']",
+        "[class*='paywall']",
+        "[class*='related']",
+        "[class*='recommend']",
+      ].join(", ")
+    )
+    .forEach((nodeToRemove) => nodeToRemove.remove());
+
+  return cleanContent(clone.innerHTML || "", baseUrl, timestamp);
+}
+
 function buildExtractionWarning({
   extractedTextLength,
   sourceArticleLength,
   sourceBodyLength,
 }) {
-  const sourceLength = Math.max(sourceArticleLength || 0, sourceBodyLength || 0);
+  const sourceLength = resolveSourceLength(sourceArticleLength, sourceBodyLength);
   if (!extractedTextLength || !sourceLength) return null;
 
   const coverage = extractedTextLength / sourceLength;
@@ -112,6 +174,22 @@ function buildExtractionWarning({
     extractedTextLength,
     sourceTextLength: sourceLength,
   };
+}
+
+function resolveSourceLength(sourceArticleLength, sourceBodyLength) {
+  // Some pages expose only a truncated <article> while full text still exists elsewhere
+  // in the saved DOM. If body text is much larger than the article node, use body length
+  // as the baseline for completeness checks.
+  let sourceLength = sourceArticleLength > 0 ? sourceArticleLength : sourceBodyLength || 0;
+  if (
+    sourceArticleLength > 0 &&
+    sourceBodyLength > 0 &&
+    sourceBodyLength >= 5000 &&
+    sourceBodyLength > sourceArticleLength * 1.9
+  ) {
+    sourceLength = sourceBodyLength;
+  }
+  return sourceLength;
 }
 
 function toDateOnly(value) {
@@ -640,17 +718,28 @@ function stripInlineHandlers(document) {
   });
 }
 
-async function fetchArchiveHtml(archiveUrl, targetUrl, timestamp) {
-  const candidates = [];
+async function fetchArchiveHtmlCandidates(archiveUrl, targetUrl, timestamp) {
+  const fetchTargets = [];
   if (timestamp) {
-    candidates.push(buildArchiveUrl(targetUrl, timestamp, "id"));
+    fetchTargets.push({
+      url: buildArchiveUrl(targetUrl, timestamp, "id"),
+      variant: "id_snapshot",
+    });
   }
-  candidates.push(archiveUrl);
+  fetchTargets.push({ url: archiveUrl, variant: "replay_snapshot" });
+
+  const unique = new Set();
+  const candidates = fetchTargets.filter((entry) => {
+    if (!entry.url || unique.has(entry.url)) return false;
+    unique.add(entry.url);
+    return true;
+  });
 
   let lastError = null;
+  const htmlCandidates = [];
   for (const candidate of candidates) {
     try {
-      const response = await fetch(candidate, {
+      const response = await fetch(candidate.url, {
         headers: {
           "User-Agent": USER_AGENT,
           Accept: "text/html,application/xhtml+xml",
@@ -660,18 +749,25 @@ async function fetchArchiveHtml(archiveUrl, targetUrl, timestamp) {
         lastError = {
           status: response.status,
           statusText: response.statusText,
-          url: candidate,
+          url: candidate.url,
         };
         continue;
       }
       const html = await response.text();
-      return { html, sourceUrl: candidate };
+      htmlCandidates.push({
+        html,
+        sourceUrl: candidate.url,
+        variant: candidate.variant,
+      });
     } catch (error) {
-      lastError = { message: error.message, url: candidate };
+      lastError = { message: error.message, url: candidate.url };
     }
   }
 
-  return { error: lastError };
+  if (!htmlCandidates.length) {
+    return { error: lastError };
+  }
+  return { candidates: htmlCandidates };
 }
 
 async function lookupCdxSnapshot(targetUrl) {
@@ -753,6 +849,115 @@ function classifySaveFailure(status, detail) {
     return { category: "blocked", label: "Unavailable for archiving" };
   }
   return { category: "unknown", label: "Unavailable for archiving" };
+}
+
+function extractFromHtmlCandidate({ html, sourceUrl, variant, targetUrl, timestamp }) {
+  const baseUrl = sourceUrl || targetUrl;
+  const dom = new JSDOM(html, { url: baseUrl });
+  const document = dom.window.document;
+
+  const sourceArticleLength = pickLikelySourceArticleLength(document);
+  const sourceBodyLength = textLengthFromNode(document.body);
+
+  stripInlineHandlers(document);
+  const figureCaptionIndex = buildFigureCaptionIndex(document, baseUrl);
+  const heroImageSource =
+    extractHeroImageSource(document, baseUrl) || figureCaptionIndex.firstFigureImageUrl;
+  const heroImage = heroImageSource ? buildArchiveUrl(heroImageSource, timestamp, "im") : null;
+  const heroCaption = extractFeaturedImageCaption(baseUrl, heroImageSource, figureCaptionIndex);
+  const publicationName = extractSiteName(document) || fallbackSiteNameFromUrl(targetUrl);
+  const publishedDate = extractPublishedDate(document);
+  let fallbackHtml = "";
+  try {
+    const fallbackDom = new JSDOM(html, { url: baseUrl });
+    stripInlineHandlers(fallbackDom.window.document);
+    fallbackHtml = buildFallbackContentHtml(fallbackDom.window.document, baseUrl, timestamp);
+  } catch (error) {
+    fallbackHtml = "";
+  }
+
+  const reader = new Readability(document);
+  const article = reader.parse();
+  if (!article?.content) {
+    return null;
+  }
+
+  let cleaned = cleanContent(article.content, baseUrl, timestamp);
+  cleaned = enrichContentWithFigureCaptions(cleaned, baseUrl, figureCaptionIndex);
+  cleaned = prependHeroImage(cleaned, heroImage, heroCaption);
+
+  let extractedTextLength = textLengthFromHtml(cleaned);
+
+  if (fallbackHtml) {
+    let enrichedFallback = enrichContentWithFigureCaptions(
+      fallbackHtml,
+      baseUrl,
+      figureCaptionIndex
+    );
+    enrichedFallback = prependHeroImage(enrichedFallback, heroImage, heroCaption);
+    const fallbackLength = textLengthFromHtml(enrichedFallback);
+    const fallbackIsStronger =
+      fallbackLength >= 1200 &&
+      fallbackLength > extractedTextLength * 1.2 &&
+      fallbackLength - extractedTextLength >= 800;
+    if (fallbackIsStronger) {
+      cleaned = enrichedFallback;
+      extractedTextLength = fallbackLength;
+    }
+  }
+
+  const sourceTextLength = resolveSourceLength(sourceArticleLength, sourceBodyLength);
+  const coverage = sourceTextLength > 0 ? extractedTextLength / sourceTextLength : 0;
+  const extractionWarning = buildExtractionWarning({
+    extractedTextLength,
+    sourceArticleLength,
+    sourceBodyLength,
+  });
+
+  return {
+    title: article.title,
+    byline: article.byline,
+    excerpt: article.excerpt,
+    contentHtml: cleaned,
+    heroImage,
+    publicationName,
+    publishedDate,
+    extractionWarning,
+    extractionSource: variant,
+    _quality: {
+      hasWarning: Boolean(extractionWarning),
+      extractedTextLength,
+      coverage,
+      sourceTextLength,
+    },
+  };
+}
+
+function chooseBestExtraction(results) {
+  if (!Array.isArray(results) || results.length === 0) return null;
+  return results
+    .slice()
+    .sort((left, right) => {
+      const leftLength = left._quality?.extractedTextLength || 0;
+      const rightLength = right._quality?.extractedTextLength || 0;
+      const maxLength = Math.max(leftLength, rightLength);
+      const minLength = Math.min(leftLength, rightLength);
+      const lengthRatio = minLength > 0 ? maxLength / minLength : maxLength > 0 ? Infinity : 1;
+      const lengthDelta = Math.abs(rightLength - leftLength);
+      // If one extraction is substantially longer, prefer it even if warning heuristics differ.
+      if (lengthRatio >= 1.25 && lengthDelta >= 1200) {
+        return rightLength - leftLength;
+      }
+
+      const leftWarning = left._quality?.hasWarning ? 1 : 0;
+      const rightWarning = right._quality?.hasWarning ? 1 : 0;
+      if (leftWarning !== rightWarning) return leftWarning - rightWarning;
+      if (leftLength !== rightLength) return rightLength - leftLength;
+
+      const leftCoverage = left._quality?.coverage || 0;
+      const rightCoverage = right._quality?.coverage || 0;
+      return rightCoverage - leftCoverage;
+    })[0];
 }
 
 exports.handler = async (event) => {
@@ -859,57 +1064,45 @@ exports.handler = async (event) => {
   const archiveUrl = snapshot.url;
   const timestamp = extractTimestamp(archiveUrl, snapshot.timestamp);
 
-  const { html, sourceUrl, error } = await fetchArchiveHtml(archiveUrl, targetUrl, timestamp);
-  if (!html) {
+  const { candidates, error } = await fetchArchiveHtmlCandidates(archiveUrl, targetUrl, timestamp);
+  if (!candidates || !candidates.length) {
     return json(502, {
       error: "Failed to fetch the archived page.",
       details: error,
     });
   }
 
-  const baseUrl = sourceUrl || archiveUrl;
-  const dom = new JSDOM(html, { url: baseUrl });
-  stripInlineHandlers(dom.window.document);
-  const figureCaptionIndex = buildFigureCaptionIndex(dom.window.document, baseUrl);
-  const heroImageSource =
-    extractHeroImageSource(dom.window.document, baseUrl) || figureCaptionIndex.firstFigureImageUrl;
-  const heroImage = heroImageSource ? buildArchiveUrl(heroImageSource, timestamp, "im") : null;
-  const heroCaption = extractFeaturedImageCaption(baseUrl, heroImageSource, figureCaptionIndex);
-  const publicationName =
-    extractSiteName(dom.window.document) || fallbackSiteNameFromUrl(targetUrl);
-  const publishedDate = extractPublishedDate(dom.window.document);
-  const reader = new Readability(dom.window.document);
-  const article = reader.parse();
+  const extractedCandidates = candidates
+    .map((candidate) =>
+      extractFromHtmlCandidate({
+        html: candidate.html,
+        sourceUrl: candidate.sourceUrl,
+        variant: candidate.variant,
+        targetUrl,
+        timestamp,
+      })
+    )
+    .filter(Boolean);
 
-  if (!article?.content) {
+  const best = chooseBestExtraction(extractedCandidates);
+  if (!best) {
     return json(500, { error: "Could not extract readable content from the archive." });
   }
-
-  let cleaned = cleanContent(article.content, baseUrl, timestamp);
-  cleaned = enrichContentWithFigureCaptions(cleaned, baseUrl, figureCaptionIndex);
-  cleaned = prependHeroImage(cleaned, heroImage, heroCaption);
-  const extractedTextLength = textLengthFromHtml(cleaned);
-  const sourceArticleLength = pickLikelySourceArticleLength(dom.window.document);
-  const sourceBodyLength = textLengthFromNode(dom.window.document.body);
-  const extractionWarning = buildExtractionWarning({
-    extractedTextLength,
-    sourceArticleLength,
-    sourceBodyLength,
-  });
 
   return json(200, {
     status: "archived",
     originalUrl: targetUrl,
     archiveUrl,
-    title: article.title,
-    byline: article.byline,
-    excerpt: article.excerpt,
-    contentHtml: cleaned,
+    title: best.title,
+    byline: best.byline,
+    excerpt: best.excerpt,
+    contentHtml: best.contentHtml,
     archiveSource,
     archiveTimestamp: timestamp,
-    heroImage,
-    publicationName,
-    publishedDate,
-    extractionWarning,
+    heroImage: best.heroImage,
+    publicationName: best.publicationName,
+    publishedDate: best.publishedDate,
+    extractionWarning: best.extractionWarning,
+    extractionSource: best.extractionSource,
   });
 };
