@@ -459,6 +459,15 @@ function stripWaybackPrefix(url) {
   return url.replace(/^https?:\/\/web\.archive\.org\/web\/\d{14}[a-z]{0,2}_?\//, "");
 }
 
+function normalizeArchiveTargetUrl(value) {
+  if (!value) return "";
+  try {
+    return new URL(value).toString();
+  } catch (error) {
+    return encodeURI(String(value));
+  }
+}
+
 function buildArchiveUrl(absoluteUrl, timestamp, modifier) {
   if (!timestamp) return absoluteUrl;
   if (absoluteUrl.startsWith(`${ARCHIVE_ORIGIN}/web/`)) {
@@ -473,7 +482,7 @@ function buildArchiveUrl(absoluteUrl, timestamp, modifier) {
     return absoluteUrl.replace(match[0], `/web/${match[1]}${modifier}_/`);
   }
   const suffix = modifier ? `${modifier}_` : "";
-  const safeUrl = encodeURI(absoluteUrl);
+  const safeUrl = normalizeArchiveTargetUrl(absoluteUrl);
   return `${ARCHIVE_ORIGIN}/web/${timestamp}${suffix}/${safeUrl}`;
 }
 

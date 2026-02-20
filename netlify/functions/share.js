@@ -60,6 +60,36 @@ function resolveOrigin(event) {
   return `${proto}://${host}`;
 }
 
+function extractCacheKeyFromEvent(event) {
+  const candidates = [];
+  if (event?.path) candidates.push(event.path);
+  if (event?.rawUrl) candidates.push(event.rawUrl);
+  if (event?.rawPath) candidates.push(event.rawPath);
+
+  const headers = event?.headers || {};
+  const headerKeys = [
+    "x-nf-original-path",
+    "x-original-uri",
+    "x-forwarded-uri",
+    "x-rewrite-url",
+  ];
+  headerKeys.forEach((key) => {
+    const value = headers[key] || headers[key.toUpperCase()];
+    if (value) candidates.push(String(value));
+  });
+
+  for (const candidate of candidates) {
+    const match = String(candidate).match(/\/s\/([^/?#]+)/);
+    if (!match || !match[1]) continue;
+    try {
+      return decodeURIComponent(match[1]);
+    } catch (error) {
+      return match[1];
+    }
+  }
+  return "";
+}
+
 async function fetchMetadata(origin, targetUrl) {
   if (!origin || !isHttpUrl(targetUrl)) return null;
   try {
@@ -99,7 +129,7 @@ exports.handler = async (event) => {
 
   const origin = resolveOrigin(event);
   const params = event.queryStringParameters || {};
-  const cacheKey = normalizeText(params.cache || "", 100);
+  const cacheKey = normalizeText(params.cache || extractCacheKeyFromEvent(event) || "", 100);
   const originalUrl = normalizeText(params.url || "", 3000);
 
   const readerUrl = buildReaderUrl(origin, originalUrl, cacheKey);

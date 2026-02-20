@@ -139,6 +139,7 @@ const setReaderWarning = (warning) => {
 
 const buildShareUrl = ({ originalUrl: pageUrl, cacheKey, title, excerpt, image }) => {
   const target = new URL(cacheKey ? `/s/${encodeURIComponent(cacheKey)}` : "/s", window.location.origin);
+  if (cacheKey) target.searchParams.set("cache", cacheKey);
   if (pageUrl) target.searchParams.set("url", pageUrl);
   const cleanTitle = normalizeShareText(title, 180);
   const cleanExcerpt = normalizeShareText(excerpt, 280);
@@ -181,15 +182,35 @@ const fixImagesInContainer = (container, timestamp) => {
       return false;
     }
   };
+  const decodeUrlOnce = (value) => {
+    if (!value) return "";
+    try {
+      return decodeURI(String(value));
+    } catch (error) {
+      return String(value);
+    }
+  };
+  const normalizeHttpUrl = (value) => {
+    const candidate = decodeUrlOnce(String(value || "").trim());
+    if (!candidate) return "";
+    try {
+      const parsed = new URL(candidate);
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "";
+      return parsed.toString();
+    } catch (error) {
+      return "";
+    }
+  };
   const ensureArchiveImage = (url) => {
-    if (!url) return url;
-    if (url.includes("web.archive.org/web/") && !url.includes("im_/")) {
-      return url.replace(/\/web\/(\d{14})([a-z]{2}_)?\//, `/web/$1im_/`);
+    const source = normalizeHttpUrl(url) || String(url || "").trim();
+    if (!source) return source;
+    if (source.includes("web.archive.org/web/") && !source.includes("im_/")) {
+      return source.replace(/\/web\/(\d{14})([a-z]{2}_)?\//, `/web/$1im_/`);
     }
-    if (timestamp && !url.includes("web.archive.org/web/")) {
-      return `https://web.archive.org/web/${timestamp}im_/${encodeURI(url)}`;
+    if (timestamp && !source.includes("web.archive.org/web/")) {
+      return `https://web.archive.org/web/${timestamp}im_/${source}`;
     }
-    return url;
+    return source;
   };
   const choosePrimaryAndFallback = (rawSrc) => {
     const source = String(rawSrc || "").trim();
@@ -197,17 +218,27 @@ const fixImagesInContainer = (container, timestamp) => {
       return { primary: "", fallback: "" };
     }
     const archiveSrc = ensureArchiveImage(source);
-    const stripped = stripArchivePrefix(archiveSrc);
+    const stripped = normalizeHttpUrl(stripArchivePrefix(archiveSrc));
+    const sourceUrl = normalizeHttpUrl(source);
     const hasArchiveWrapper = archiveSrc.includes("web.archive.org/web/");
 
-    if (hasArchiveWrapper && isValidHttpUrl(stripped)) {
-      return { primary: stripped, fallback: archiveSrc === stripped ? "" : archiveSrc };
+    if (hasArchiveWrapper && isValidHttpUrl(archiveSrc)) {
+      return {
+        primary: archiveSrc,
+        fallback: stripped && stripped !== archiveSrc ? stripped : "",
+      };
     }
-    if (isValidHttpUrl(source)) {
-      return { primary: source, fallback: archiveSrc !== source ? archiveSrc : "" };
+    if (sourceUrl) {
+      if (isValidHttpUrl(archiveSrc) && archiveSrc !== sourceUrl) {
+        return { primary: archiveSrc, fallback: sourceUrl };
+      }
+      return {
+        primary: sourceUrl,
+        fallback: stripped && stripped !== sourceUrl ? stripped : "",
+      };
     }
-    if (isValidHttpUrl(stripped)) {
-      return { primary: stripped, fallback: archiveSrc !== stripped ? archiveSrc : "" };
+    if (stripped) {
+      return { primary: stripped, fallback: "" };
     }
     return { primary: archiveSrc || source, fallback: "" };
   };
@@ -286,6 +317,17 @@ const fixImagesInContainer = (container, timestamp) => {
     img.setAttribute("referrerpolicy", "no-referrer");
     attachFallback(img);
   });
+};
+
+const renderContentHtml = (container, html, timestamp) => {
+  if (!container) return;
+  const staging = document.createElement("div");
+  staging.innerHTML = html || "";
+  fixImagesInContainer(staging, timestamp);
+  container.replaceChildren();
+  while (staging.firstChild) {
+    container.appendChild(staging.firstChild);
+  }
 };
 
 const checkArchiveForUrl = async (url) => {
@@ -382,8 +424,7 @@ const checkArchiveForUrl = async (url) => {
   }
 
   originalUrl.textContent = data.originalUrl;
-  readerContent.innerHTML = data.contentHtml;
-  fixImagesInContainer(readerContent, data.archiveTimestamp);
+  renderContentHtml(readerContent, data.contentHtml, data.archiveTimestamp);
   setReaderWarning(data.extractionWarning);
   resultSection.classList.remove("hidden");
 };
