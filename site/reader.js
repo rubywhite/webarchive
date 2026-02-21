@@ -385,6 +385,21 @@ if (cached) {
         }
         return;
       }
+      if (data.status === "archived_link_only") {
+        titleEl.textContent = data.title || "Archived snapshot";
+        document.title = titleEl.textContent;
+        archiveLink.href = data.archiveUrl || "#";
+        originalUrl.textContent = data.originalUrl || url;
+        bylineEl.textContent = "";
+        contentEl.innerHTML =
+          "<p>Wayback has a snapshot, but clean extraction is unavailable right now. Use the snapshot link above.</p>";
+        setReaderWarning(null);
+        setStatus(
+          data.message || "Archive snapshot found, but clean reader extraction is unavailable.",
+          "info"
+        );
+        return;
+      }
       if (data.status !== "archived") {
         throw new Error("Unexpected response from the archive service.");
       }

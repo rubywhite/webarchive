@@ -4,6 +4,11 @@ const { Readability } = require("@mozilla/readability");
 const USER_AGENT = "WebArchive/1.0";
 const ARCHIVE_ORIGIN = "https://web.archive.org";
 const PARSE_HTML_MAX_LENGTH = 3_000_000;
+const HANDLER_DEADLINE_MS = 34_000;
+const SNAPSHOT_FETCH_TIMEOUT_MS = 9_000;
+const API_FETCH_TIMEOUT_MS = 4_500;
+const DEADLINE_RESERVE_MS = 250;
+const MIN_TIME_FOR_EXTRA_SNAPSHOT_MS = 4_000;
 
 const JSDOM_VIRTUAL_CONSOLE = new VirtualConsole();
 JSDOM_VIRTUAL_CONSOLE.on("jsdomError", (error) => {
@@ -36,6 +41,47 @@ function json(statusCode, payload) {
     },
     body: JSON.stringify(payload),
   };
+}
+
+function deadlineRemainingMs(deadlineMs) {
+  if (!deadlineMs) return Infinity;
+  return deadlineMs - Date.now();
+}
+
+function isDeadlineExceeded(deadlineMs, reserveMs = 0) {
+  return deadlineRemainingMs(deadlineMs) <= reserveMs;
+}
+
+async function fetchWithDeadline(
+  url,
+  options = {},
+  { deadlineMs, timeoutMs = SNAPSHOT_FETCH_TIMEOUT_MS, reserveMs = DEADLINE_RESERVE_MS } = {}
+) {
+  const remaining = deadlineRemainingMs(deadlineMs) - reserveMs;
+  if (remaining <= 0) {
+    const error = new Error("Operation deadline exceeded.");
+    error.code = "DEADLINE_EXCEEDED";
+    throw error;
+  }
+
+  const safeTimeoutMs = Math.max(250, Math.min(timeoutMs, remaining));
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), safeTimeoutMs);
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      const timeoutError = new Error(`Fetch timed out after ${safeTimeoutMs}ms.`);
+      timeoutError.code = "FETCH_TIMEOUT";
+      throw timeoutError;
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function isHttpUrl(input) {
@@ -85,6 +131,13 @@ function textLengthFromHtml(html) {
   } catch (error) {
     return 0;
   }
+}
+
+function textLengthFromDocumentBody(document) {
+  if (!document?.body) return 0;
+  const clone = document.body.cloneNode(true);
+  clone.querySelectorAll("script, style, noscript, template").forEach((node) => node.remove());
+  return textLengthFromNode(clone);
 }
 
 function pickLikelySourceArticleLength(document) {
@@ -862,12 +915,18 @@ function shouldTryAlternateVariant(extraction) {
   const sourceLength = quality.sourceTextLength || 0;
   const extractedLength = quality.extractedTextLength || 0;
   const coverage = quality.coverage || 0;
+  const missingChars = sourceLength - extractedLength;
 
-  if (quality.hasWarning) return true;
-  if (sourceLength === 0 && extractedLength < 4500) return true;
-  if (sourceLength >= 5000 && coverage < 0.72) return true;
-  if (sourceLength >= 3000 && extractedLength < 2600) return true;
-  return false;
+  if (sourceLength <= 0) {
+    return extractedLength < 4200;
+  }
+
+  if (coverage >= 0.68) return false;
+  if (extractedLength >= 6000 && coverage >= 0.6) return false;
+  if (missingChars <= 1400) return false;
+  if (coverage < 0.5) return true;
+  if (quality.hasWarning && coverage < 0.62 && missingChars > 1800) return true;
+  return extractedLength < 3000;
 }
 
 async function fetchAndExtractVariant({
@@ -875,14 +934,33 @@ async function fetchAndExtractVariant({
   timestamp,
   variant,
   sourceUrl,
+  deadlineMs,
 }) {
-  try {
-    const response = await fetch(sourceUrl, {
-      headers: {
-        "User-Agent": USER_AGENT,
-        Accept: "text/html,application/xhtml+xml",
+  if (isDeadlineExceeded(deadlineMs, DEADLINE_RESERVE_MS)) {
+    return {
+      error: {
+        message: "Extraction deadline exceeded before snapshot fetch.",
+        url: sourceUrl,
+        variant,
+        timeout: true,
       },
-    });
+    };
+  }
+
+  try {
+    const response = await fetchWithDeadline(
+      sourceUrl,
+      {
+        headers: {
+          "User-Agent": USER_AGENT,
+          Accept: "text/html,application/xhtml+xml",
+        },
+      },
+      {
+        deadlineMs,
+        timeoutMs: SNAPSHOT_FETCH_TIMEOUT_MS,
+      }
+    );
     if (!response.ok) {
       return {
         error: {
@@ -917,18 +995,27 @@ async function fetchAndExtractVariant({
         message: error.message,
         url: sourceUrl,
         variant,
+        timeout: error?.code === "FETCH_TIMEOUT" || error?.code === "DEADLINE_EXCEEDED",
       },
     };
   }
 }
 
-async function resolveBestExtractionForSnapshot({ archiveUrl, targetUrl, timestamp }) {
+async function resolveBestExtractionForSnapshot({
+  archiveUrl,
+  targetUrl,
+  timestamp,
+  deadlineMs,
+}) {
   const variants = buildSnapshotVariantCandidates(archiveUrl, targetUrl, timestamp);
   let bestExtraction = null;
   let lastError = null;
 
   for (let index = 0; index < variants.length; index += 1) {
     if (index > 0 && !shouldTryAlternateVariant(bestExtraction)) {
+      break;
+    }
+    if (isDeadlineExceeded(deadlineMs, MIN_TIME_FOR_EXTRA_SNAPSHOT_MS)) {
       break;
     }
 
@@ -938,30 +1025,49 @@ async function resolveBestExtractionForSnapshot({ archiveUrl, targetUrl, timesta
       timestamp,
       variant: candidate.variant,
       sourceUrl: candidate.url,
+      deadlineMs,
     });
     if (error) {
       lastError = error;
+      if (error.timeout && bestExtraction) {
+        break;
+      }
       continue;
     }
     bestExtraction = chooseBestExtraction([bestExtraction, extraction].filter(Boolean));
   }
 
   if (!bestExtraction) {
+    if (!lastError && isDeadlineExceeded(deadlineMs, DEADLINE_RESERVE_MS)) {
+      return {
+        error: {
+          message: "Extraction timed out before any snapshot variant completed.",
+          timeout: true,
+        },
+      };
+    }
     return { error: lastError };
   }
   return { extraction: bestExtraction };
 }
 
-async function lookupCdxSnapshots(targetUrl, limit = 5) {
+async function lookupCdxSnapshots(targetUrl, limit = 5, deadlineMs) {
   const safeLimit = Math.max(1, Math.min(Number(limit) || 5, 8));
   const cdxUrl = `https://web.archive.org/cdx/search/cdx?url=${encodeURIComponent(
     targetUrl
   )}&output=json&fl=timestamp,original,statuscode&filter=statuscode:200&limit=${safeLimit}&sort=descending`;
 
   try {
-    const response = await fetch(cdxUrl, {
-      headers: { "User-Agent": USER_AGENT },
-    });
+    const response = await fetchWithDeadline(
+      cdxUrl,
+      {
+        headers: { "User-Agent": USER_AGENT },
+      },
+      {
+        deadlineMs,
+        timeoutMs: API_FETCH_TIMEOUT_MS,
+      }
+    );
     if (!response.ok) {
       return [];
     }
@@ -1045,7 +1151,7 @@ function extractFromHtmlCandidate({ html, sourceUrl, variant, targetUrl, timesta
   const document = dom.window.document;
 
   const sourceArticleLength = pickLikelySourceArticleLength(document);
-  const sourceBodyLength = textLengthFromNode(document.body);
+  const sourceBodyLength = textLengthFromDocumentBody(document);
 
   stripInlineHandlers(document);
   const figureCaptionIndex = buildFigureCaptionIndex(document, baseUrl);
@@ -1203,21 +1309,28 @@ function shouldTryAdditionalSnapshots(resolvedPage) {
   const sourceLength = quality.sourceTextLength || 0;
   const extractedLength = quality.extractedTextLength || 0;
   const coverage = quality.coverage || 0;
+  const missingChars = sourceLength - extractedLength;
 
-  if (quality.hasWarning) return true;
-  if (sourceLength === 0 && extractedLength < 5500) return true;
-  if (sourceLength >= 7000 && coverage < 0.75) return true;
-  if (sourceLength >= 5000 && extractedLength < 5000) return true;
-  return false;
+  if (sourceLength <= 0) {
+    return extractedLength < 5200;
+  }
+
+  if (coverage >= 0.72) return false;
+  if (extractedLength >= 7000 && coverage >= 0.65) return false;
+  if (missingChars <= 1800) return false;
+  if (quality.hasWarning && coverage < 0.65 && missingChars > 2200) return true;
+  if (coverage < 0.55) return true;
+  return sourceLength >= 9000 && coverage < 0.66;
 }
 
-async function resolveSnapshotCandidate(snapshotEntry, archiveSource, targetUrl) {
+async function resolveSnapshotCandidate(snapshotEntry, archiveSource, targetUrl, deadlineMs) {
   const archiveUrl = snapshotEntry.url;
   const timestamp = extractTimestamp(archiveUrl, snapshotEntry.timestamp);
   const { extraction, error } = await resolveBestExtractionForSnapshot({
     archiveUrl,
     targetUrl,
     timestamp,
+    deadlineMs,
   });
   if (!extraction) {
     return { error };
@@ -1293,7 +1406,9 @@ function buildTargetUrlVariants(targetUrl) {
 function scoreFallbackResult(statusCode, payload, variantIndex) {
   const status = payload?.status;
   let score = 100;
-  if (statusCode === 200 && status === "submitted") {
+  if (statusCode === 200 && status === "archived_link_only") {
+    score = 510;
+  } else if (statusCode === 200 && status === "submitted") {
     score = 500;
   } else if (statusCode === 200 && status === "blocked") {
     score = 450;
@@ -1323,14 +1438,31 @@ function decorateVariantResponse(result, requestedUrl, resolvedUrl) {
   };
 }
 
-async function resolveArchiveForTarget(targetUrl, { allowSaveSubmission = true } = {}) {
+async function resolveArchiveForTarget(
+  targetUrl,
+  { allowSaveSubmission = true, deadlineMs } = {}
+) {
+  if (isDeadlineExceeded(deadlineMs, DEADLINE_RESERVE_MS)) {
+    return {
+      statusCode: 502,
+      payload: { error: "Archive lookup timed out before request could complete." },
+    };
+  }
+
   const availabilityUrl = `https://archive.org/wayback/available?url=${encodeURIComponent(targetUrl)}`;
 
   let availability;
   try {
-    const availabilityRes = await fetch(availabilityUrl, {
-      headers: { "User-Agent": USER_AGENT },
-    });
+    const availabilityRes = await fetchWithDeadline(
+      availabilityUrl,
+      {
+        headers: { "User-Agent": USER_AGENT },
+      },
+      {
+        deadlineMs,
+        timeoutMs: API_FETCH_TIMEOUT_MS,
+      }
+    );
     if (!availabilityRes.ok) {
       return {
         statusCode: 502,
@@ -1341,7 +1473,12 @@ async function resolveArchiveForTarget(targetUrl, { allowSaveSubmission = true }
   } catch (error) {
     return {
       statusCode: 502,
-      payload: { error: "Wayback availability check failed." },
+      payload: {
+        error:
+          error?.code === "FETCH_TIMEOUT" || error?.code === "DEADLINE_EXCEEDED"
+            ? "Wayback availability check timed out."
+            : "Wayback availability check failed.",
+      },
     };
   }
 
@@ -1358,7 +1495,7 @@ async function resolveArchiveForTarget(targetUrl, { allowSaveSubmission = true }
     };
     primarySource = "availability";
   } else {
-    cdxSnapshots = await lookupCdxSnapshots(targetUrl, 5);
+    cdxSnapshots = await lookupCdxSnapshots(targetUrl, 5, deadlineMs);
     if (cdxSnapshots.length > 0) {
       primarySnapshot = cdxSnapshots[0];
       primarySource = "cdx";
@@ -1372,15 +1509,28 @@ async function resolveArchiveForTarget(targetUrl, { allowSaveSubmission = true }
         payload: { error: "No archived snapshot found for this URL variant." },
       };
     }
+    if (isDeadlineExceeded(deadlineMs, API_FETCH_TIMEOUT_MS)) {
+      return {
+        statusCode: 502,
+        payload: { error: "Wayback lookup timed out before save submission." },
+      };
+    }
 
     let archiveUrl = null;
     let submission = null;
     try {
-      const saveRes = await fetch(`https://web.archive.org/save/${targetUrl}`, {
-        method: "GET",
-        redirect: "manual",
-        headers: { "User-Agent": USER_AGENT },
-      });
+      const saveRes = await fetchWithDeadline(
+        `https://web.archive.org/save/${targetUrl}`,
+        {
+          method: "GET",
+          redirect: "manual",
+          headers: { "User-Agent": USER_AGENT },
+        },
+        {
+          deadlineMs,
+          timeoutMs: API_FETCH_TIMEOUT_MS,
+        }
+      );
       const detailText = normalizeSaveDetail(await saveRes.text().catch(() => ""));
       const classification = classifySaveFailure(saveRes.status, detailText);
       const contentLocation = saveRes.headers.get("content-location");
@@ -1430,18 +1580,24 @@ async function resolveArchiveForTarget(targetUrl, { allowSaveSubmission = true }
   }
 
   const processedSnapshots = new Set();
-  const MAX_SNAPSHOT_ATTEMPTS = 3;
+  const MAX_SNAPSHOT_ATTEMPTS = 2;
   let resolvedPage = null;
   let lastFetchError = null;
 
   const attemptSnapshot = async (snapshotEntry, source) => {
     if (!snapshotEntry?.url) return;
+    if (isDeadlineExceeded(deadlineMs, MIN_TIME_FOR_EXTRA_SNAPSHOT_MS)) return;
     const key = snapshotKey(snapshotEntry, targetUrl);
     if (!key || processedSnapshots.has(key)) return;
     if (processedSnapshots.size >= MAX_SNAPSHOT_ATTEMPTS) return;
     processedSnapshots.add(key);
 
-    const candidate = await resolveSnapshotCandidate(snapshotEntry, source, targetUrl);
+    const candidate = await resolveSnapshotCandidate(
+      snapshotEntry,
+      source,
+      targetUrl,
+      deadlineMs
+    );
     if (candidate?.extraction) {
       resolvedPage = chooseBestResolvedPage(resolvedPage, candidate);
     } else if (candidate?.error) {
@@ -1453,13 +1609,17 @@ async function resolveArchiveForTarget(targetUrl, { allowSaveSubmission = true }
 
   if (
     (!resolvedPage || shouldTryAdditionalSnapshots(resolvedPage)) &&
-    processedSnapshots.size < MAX_SNAPSHOT_ATTEMPTS
+    processedSnapshots.size < MAX_SNAPSHOT_ATTEMPTS &&
+    !isDeadlineExceeded(deadlineMs, MIN_TIME_FOR_EXTRA_SNAPSHOT_MS)
   ) {
     if (!cdxSnapshots) {
-      cdxSnapshots = await lookupCdxSnapshots(targetUrl, 5);
+      cdxSnapshots = await lookupCdxSnapshots(targetUrl, 5, deadlineMs);
     }
     for (const snapshotEntry of cdxSnapshots) {
       if (processedSnapshots.size >= MAX_SNAPSHOT_ATTEMPTS) {
+        break;
+      }
+      if (isDeadlineExceeded(deadlineMs, MIN_TIME_FOR_EXTRA_SNAPSHOT_MS)) {
         break;
       }
       await attemptSnapshot(snapshotEntry, "cdx");
@@ -1470,6 +1630,27 @@ async function resolveArchiveForTarget(targetUrl, { allowSaveSubmission = true }
   }
 
   if (!resolvedPage) {
+    const fallbackArchiveUrl = primarySnapshot?.url || null;
+    if (fallbackArchiveUrl) {
+      const fallbackTimestamp = extractTimestamp(
+        fallbackArchiveUrl,
+        primarySnapshot?.timestamp
+      );
+      return {
+        statusCode: 200,
+        payload: {
+          status: "archived_link_only",
+          originalUrl: targetUrl,
+          archiveUrl: fallbackArchiveUrl,
+          archiveSource: primarySource,
+          archiveTimestamp: fallbackTimestamp,
+          title: "Archived snapshot",
+          message:
+            "Archive snapshot found, but clean reader extraction is unavailable right now.",
+          details: lastFetchError,
+        },
+      };
+    }
     if (lastFetchError) {
       return {
         statusCode: 502,
@@ -1525,12 +1706,17 @@ exports.handler = async (event) => {
   const requestedUrl = parsed.href;
 
   const variants = buildTargetUrlVariants(requestedUrl);
+  const deadlineMs = Date.now() + HANDLER_DEADLINE_MS;
   let bestFallback = null;
 
   for (let index = 0; index < variants.length; index += 1) {
+    if (index > 0 && isDeadlineExceeded(deadlineMs, MIN_TIME_FOR_EXTRA_SNAPSHOT_MS)) {
+      break;
+    }
     const variantUrl = variants[index];
     const attempt = await resolveArchiveForTarget(variantUrl, {
       allowSaveSubmission: index === 0,
+      deadlineMs,
     });
     const decorated = decorateVariantResponse(attempt, requestedUrl, variantUrl);
     if (decorated.statusCode === 200 && decorated.payload?.status === "archived") {

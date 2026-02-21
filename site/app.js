@@ -367,6 +367,24 @@ const checkArchiveForUrl = async (url) => {
     return;
   }
 
+  if (data.status === "archived_link_only") {
+    setStatus(
+      data.message || "Archive snapshot found, but clean reader extraction is unavailable right now.",
+      "info"
+    );
+    readerTitle.textContent = data.title || "Archived snapshot";
+    readerByline.textContent = "";
+    archiveLink.href = data.archiveUrl || "#";
+    archiveLink.textContent = "View the archived snapshot";
+    readerLink.href = buildReaderUrl(data.originalUrl || url);
+    readerLink.textContent = "Try clean reader view again";
+    originalUrl.textContent = data.originalUrl || url;
+    readerContent.innerHTML =
+      "<p>Wayback has a snapshot, but clean extraction is unavailable right now. Use the snapshot link above.</p>";
+    resultSection.classList.remove("hidden");
+    return;
+  }
+
   if (data.status !== "archived") {
     throw new Error("Unexpected response from the archive service.");
   }
