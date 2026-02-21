@@ -9,6 +9,42 @@ const SNAPSHOT_FETCH_TIMEOUT_MS = 9_000;
 const API_FETCH_TIMEOUT_MS = 4_500;
 const DEADLINE_RESERVE_MS = 250;
 const MIN_TIME_FOR_EXTRA_SNAPSHOT_MS = 4_000;
+const TRACKING_QUERY_PREFIXES = ["utm_", "mc_", "pk_", "vero_", "ga_", "hsa_"];
+const TRACKING_QUERY_NAMES = new Set([
+  "fbclid",
+  "gclid",
+  "dclid",
+  "msclkid",
+  "yclid",
+  "gbraid",
+  "wbraid",
+  "igshid",
+  "mkt_tok",
+  "_hsenc",
+  "_hsmi",
+  "ref_src",
+  "soc_src",
+  "soc_trk",
+  "si",
+]);
+const CONTENT_QUERY_NAMES = new Set([
+  "id",
+  "p",
+  "page",
+  "article",
+  "story",
+  "slug",
+  "lang",
+  "locale",
+  "q",
+  "query",
+  "search",
+  "s",
+  "category",
+  "cat",
+  "tag",
+  "tags",
+]);
 
 const JSDOM_VIRTUAL_CONSOLE = new VirtualConsole();
 JSDOM_VIRTUAL_CONSOLE.on("jsdomError", (error) => {
@@ -1383,16 +1419,7 @@ function toggleTrailingSlashForUrl(url) {
   }
 }
 
-function buildTargetUrlVariants(targetUrl) {
-  const candidates = [
-    targetUrl,
-    toggleTrailingSlashForUrl(targetUrl),
-    toggleWwwForUrl(targetUrl),
-  ];
-  const slashThenWww = candidates[1] ? toggleWwwForUrl(candidates[1]) : null;
-  const wwwThenSlash = candidates[2] ? toggleTrailingSlashForUrl(candidates[2]) : null;
-  candidates.push(slashThenWww, wwwThenSlash);
-
+function dedupeUrls(candidates) {
   const variants = [];
   const seen = new Set();
   candidates.forEach((candidate) => {
@@ -1401,6 +1428,121 @@ function buildTargetUrlVariants(targetUrl) {
     variants.push(candidate);
   });
   return variants;
+}
+
+function classifyQueryParamName(name) {
+  const key = String(name || "").toLowerCase();
+  if (!key) return "unknown";
+  if (TRACKING_QUERY_NAMES.has(key)) return "tracking";
+  if (TRACKING_QUERY_PREFIXES.some((prefix) => key.startsWith(prefix))) return "tracking";
+  if (CONTENT_QUERY_NAMES.has(key)) return "content";
+  return "unknown";
+}
+
+function buildFilteredQueryUrl(sourceUrl, mode) {
+  try {
+    const parsed = new URL(sourceUrl);
+    if (!parsed.searchParams.size) return null;
+    const keptEntries = [];
+    let changed = false;
+
+    for (const [name, value] of parsed.searchParams.entries()) {
+      const category = classifyQueryParamName(name);
+      const keep =
+        mode === "drop_tracking" ? category !== "tracking" : category === "content";
+      if (keep) {
+        keptEntries.push([name, value]);
+      } else {
+        changed = true;
+      }
+    }
+
+    if (!changed) return null;
+
+    const next = new URL(parsed.toString());
+    next.search = "";
+    keptEntries.forEach(([name, value]) => next.searchParams.append(name, value));
+    const resolved = next.toString();
+    if (resolved === sourceUrl) return null;
+    return resolved;
+  } catch (error) {
+    return null;
+  }
+}
+
+function buildQueryNormalizedVariants(sourceUrl) {
+  const trackingCleaned = buildFilteredQueryUrl(sourceUrl, "drop_tracking");
+  const contentOnly = buildFilteredQueryUrl(sourceUrl, "keep_content");
+  return dedupeUrls([trackingCleaned, contentOnly]);
+}
+
+function buildHostPathVariants(targetUrl) {
+  const candidates = [
+    targetUrl,
+    toggleTrailingSlashForUrl(targetUrl),
+    toggleWwwForUrl(targetUrl),
+  ];
+  const slashThenWww = candidates[1] ? toggleWwwForUrl(candidates[1]) : null;
+  const wwwThenSlash = candidates[2] ? toggleTrailingSlashForUrl(candidates[2]) : null;
+  candidates.push(slashThenWww, wwwThenSlash);
+  return dedupeUrls(candidates);
+}
+
+function buildTargetUrlVariants(targetUrl) {
+  const hostVariants = buildHostPathVariants(targetUrl);
+  const queryVariants = buildQueryNormalizedVariants(targetUrl);
+  return dedupeUrls([
+    hostVariants[0],
+    ...queryVariants,
+    ...hostVariants.slice(1),
+  ]);
+}
+
+function summarizeQueryNormalization(requestedUrl, resolvedUrl) {
+  try {
+    const requested = new URL(requestedUrl);
+    const resolved = new URL(resolvedUrl);
+    if (requested.search === resolved.search) return null;
+
+    const resolvedCounts = new Map();
+    for (const name of resolved.searchParams.keys()) {
+      const key = name.toLowerCase();
+      resolvedCounts.set(key, (resolvedCounts.get(key) || 0) + 1);
+    }
+
+    const removedTracking = new Set();
+    const removedUnknown = new Set();
+    const removedContent = new Set();
+
+    for (const name of requested.searchParams.keys()) {
+      const key = name.toLowerCase();
+      const count = resolvedCounts.get(key) || 0;
+      if (count > 0) {
+        resolvedCounts.set(key, count - 1);
+        continue;
+      }
+      const category = classifyQueryParamName(name);
+      if (category === "tracking") {
+        removedTracking.add(key);
+      } else if (category === "content") {
+        removedContent.add(key);
+      } else {
+        removedUnknown.add(key);
+      }
+    }
+
+    if (!removedTracking.size && !removedUnknown.size && !removedContent.size) {
+      return null;
+    }
+
+    return {
+      removedTrackingParams: Array.from(removedTracking),
+      removedUnknownParams: Array.from(removedUnknown),
+      removedContentParams: Array.from(removedContent),
+    };
+  } catch (error) {
+    return null;
+  }
 }
 
 function scoreFallbackResult(statusCode, payload, variantIndex) {
@@ -1430,6 +1572,10 @@ function decorateVariantResponse(result, requestedUrl, resolvedUrl) {
     payload.originalUrl = requestedUrl;
     if (resolvedUrl && resolvedUrl !== requestedUrl) {
       payload.resolvedUrl = resolvedUrl;
+      const queryNormalization = summarizeQueryNormalization(requestedUrl, resolvedUrl);
+      if (queryNormalization) {
+        payload.queryNormalization = queryNormalization;
+      }
     }
   }
   return {
