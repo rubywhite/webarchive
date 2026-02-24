@@ -4,6 +4,7 @@ const { Readability } = require("@mozilla/readability");
 const USER_AGENT = "WebArchive/1.0";
 const ARCHIVE_ORIGIN = "https://web.archive.org";
 const PARSE_HTML_MAX_LENGTH = 3_000_000;
+const MIN_HERO_TEXT_LENGTH = 900;
 const HANDLER_DEADLINE_MS = 34_000;
 const SNAPSHOT_FETCH_TIMEOUT_MS = 9_000;
 const API_FETCH_TIMEOUT_MS = 4_500;
@@ -618,6 +619,11 @@ function cleanContent(html, baseUrl, timestamp) {
     el.remove();
   });
 
+  // Remove inline styles so extracted content cannot force overlays or full-screen media.
+  document.querySelectorAll("[style]").forEach((node) => {
+    node.removeAttribute("style");
+  });
+
   document.querySelectorAll("img").forEach((img) => {
     const src = img.getAttribute("src");
     if (!src || src.startsWith("data:") || src === "about:blank") {
@@ -924,6 +930,17 @@ function prependHeroImage(contentHtml, heroUrl, heroCaption) {
   return `<figure class="reader-hero"><img src="${heroUrl}" alt="" />${captionMarkup}</figure>${contentHtml}`;
 }
 
+function maybePrependHeroImage(contentHtml, heroUrl, heroCaption, extractedTextLength) {
+  const textLength =
+    typeof extractedTextLength === "number"
+      ? extractedTextLength
+      : textLengthFromHtml(contentHtml);
+  if (textLength < MIN_HERO_TEXT_LENGTH) {
+    return contentHtml;
+  }
+  return prependHeroImage(contentHtml, heroUrl, heroCaption);
+}
+
 function stripInlineHandlers(document) {
   document.querySelectorAll("*").forEach((node) => {
     Array.from(node.attributes).forEach((attr) => {
@@ -1209,9 +1226,8 @@ function extractFromHtmlCandidate({ html, sourceUrl, variant, targetUrl, timesta
 
   let cleaned = cleanContent(article.content, baseUrl, timestamp);
   cleaned = enrichContentWithFigureCaptions(cleaned, baseUrl, figureCaptionIndex);
-  cleaned = prependHeroImage(cleaned, heroImage, heroCaption);
-
   let extractedTextLength = textLengthFromHtml(cleaned);
+  cleaned = maybePrependHeroImage(cleaned, heroImage, heroCaption, extractedTextLength);
   const shouldTryFallback =
     extractedTextLength < 4500 ||
     (sourceArticleLength > 0 && extractedTextLength < sourceArticleLength * 0.75);
@@ -1224,8 +1240,13 @@ function extractFromHtmlCandidate({ html, sourceUrl, variant, targetUrl, timesta
         baseUrl,
         figureCaptionIndex
       );
-      enrichedFallback = prependHeroImage(enrichedFallback, heroImage, heroCaption);
       const fallbackLength = textLengthFromHtml(enrichedFallback);
+      enrichedFallback = maybePrependHeroImage(
+        enrichedFallback,
+        heroImage,
+        heroCaption,
+        fallbackLength
+      );
       const fallbackIsStronger =
         fallbackLength >= 1200 &&
         fallbackLength > extractedTextLength * 1.2 &&
@@ -1244,7 +1265,12 @@ function extractFromHtmlCandidate({ html, sourceUrl, variant, targetUrl, timesta
       jsonLdLength > extractedTextLength * 1.3 &&
       jsonLdLength - extractedTextLength >= 900;
     if (jsonLdIsStronger) {
-      cleaned = prependHeroImage(jsonLdBodyHtml, heroImage, heroCaption);
+      cleaned = maybePrependHeroImage(
+        jsonLdBodyHtml,
+        heroImage,
+        heroCaption,
+        jsonLdLength
+      );
       extractedTextLength = textLengthFromHtml(cleaned);
     }
   }
