@@ -35,7 +35,23 @@
           </svg>
           Share
         </button>
-        <div id="share-qr" class="share-qr" hidden>
+      </div>
+    </header>
+
+    <main class="reader-shell">
+      <section class="reader-info">
+        <div class="reader-info-main">
+          <div>
+            <p class="reader-title" id="reader-title">Loading…</p>
+            <p class="reader-byline" id="reader-byline"></p>
+          </div>
+          <div class="reader-links">
+            <a id="archive-link" href="#" target="_blank" rel="noreferrer">View on web.archive.org</a>
+            <span id="archive-source" class="archive-source"></span>
+            <span id="original-url" class="original-url"></span>
+          </div>
+        </div>
+        <div id="share-qr" class="share-qr reader-info-qr" hidden>
           <a
             id="share-qr-link"
             class="share-qr-link"
@@ -53,21 +69,6 @@
               decoding="async"
             />
           </a>
-          <span class="share-qr-label">Scan to open</span>
-        </div>
-      </div>
-    </header>
-
-    <main class="reader-shell">
-      <section class="reader-info">
-        <div>
-          <p class="reader-title" id="reader-title">Loading…</p>
-          <p class="reader-byline" id="reader-byline"></p>
-        </div>
-        <div class="reader-links">
-          <a id="archive-link" href="#" target="_blank" rel="noreferrer">View on web.archive.org</a>
-          <span id="archive-source" class="archive-source"></span>
-          <span id="original-url" class="original-url"></span>
         </div>
       </section>
       <p id="reader-status" class="status" role="status" aria-live="polite"></p>

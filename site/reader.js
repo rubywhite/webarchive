@@ -109,30 +109,56 @@ const buildShareUrl = ({ originalUrl: pageUrl, cacheKey, title, excerpt, image }
   return target.toString();
 };
 
+const buildCompactQrTargetUrl = (shareUrl) => {
+  try {
+    const parsed = new URL(shareUrl);
+    const compact = new URL(parsed.pathname, parsed.origin);
+    const targetUrl = parsed.searchParams.get("url");
+    const cache = parsed.searchParams.get("cache");
+    if (targetUrl) {
+      compact.searchParams.set("url", targetUrl);
+    }
+    if (!compact.pathname.startsWith("/s/") && cache) {
+      compact.searchParams.set("cache", cache);
+    }
+    return compact.toString();
+  } catch (error) {
+    return String(shareUrl || "").trim();
+  }
+};
+
 const buildQrImageUrl = (value) => {
   const target = new URL("https://api.qrserver.com/v1/create-qr-code/");
-  target.searchParams.set("size", "176x176");
+  target.searchParams.set("size", "320x320");
   target.searchParams.set("margin", "0");
-  target.searchParams.set("ecc", "M");
+  target.searchParams.set("ecc", "L");
   target.searchParams.set("data", value);
   return target.toString();
 };
 
 const updateShareQr = (shareUrl) => {
   if (!shareQr || !shareQrImage || !shareQrLink) return;
-  const value = String(shareUrl || "").trim();
-  if (!value || value === "#") {
+  const rawValue = String(shareUrl || "").trim();
+  if (!rawValue || rawValue === "#") {
     shareQr.hidden = true;
     shareQrLink.href = "#";
     shareQrImage.removeAttribute("src");
     shareQrImage.removeAttribute("data-share-url");
     return;
   }
-  if (shareQrImage.dataset.shareUrl !== value) {
-    shareQrImage.src = buildQrImageUrl(value);
-    shareQrImage.dataset.shareUrl = value;
+  const qrTargetUrl = buildCompactQrTargetUrl(rawValue);
+  if (!qrTargetUrl || qrTargetUrl === "#") {
+    shareQr.hidden = true;
+    shareQrLink.href = "#";
+    shareQrImage.removeAttribute("src");
+    shareQrImage.removeAttribute("data-share-url");
+    return;
   }
-  shareQrLink.href = value;
+  if (shareQrImage.dataset.shareUrl !== qrTargetUrl) {
+    shareQrImage.src = buildQrImageUrl(qrTargetUrl);
+    shareQrImage.dataset.shareUrl = qrTargetUrl;
+  }
+  shareQrLink.href = qrTargetUrl;
   shareQr.hidden = false;
 };
 
