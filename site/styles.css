@@ -752,7 +752,7 @@ button:disabled {
   }
 
   .reader-info-qr {
-    justify-self: end;
+    justify-self: start;
   }
 
   .share-qr-image {
