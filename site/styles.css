@@ -87,6 +87,37 @@ body {
   border-color: rgba(217, 90, 43, 0.4);
 }
 
+.share-qr {
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.92);
+  border-radius: 12px;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.share-qr-link {
+  display: block;
+  line-height: 0;
+}
+
+.share-qr-image {
+  width: 88px;
+  height: 88px;
+  display: block;
+  border-radius: 8px;
+}
+
+.share-qr-label {
+  font-family: "Space Grotesk", "Trebuchet MS", sans-serif;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
 .brand {
   display: flex;
   align-items: center;
@@ -713,6 +744,11 @@ button:disabled {
   .site-footer {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .share-qr-image {
+    width: 76px;
+    height: 76px;
   }
 
   .footer-left {

@@ -7,6 +7,9 @@ const contentEl = document.getElementById("reader-content");
 const statusEl = document.getElementById("reader-status");
 const shareButton = document.getElementById("share-button");
 const readerWarning = document.getElementById("reader-warning");
+const shareQr = document.getElementById("share-qr");
+const shareQrImage = document.getElementById("share-qr-image");
+const shareQrLink = document.getElementById("share-qr-link");
 
 const CACHE_PREFIX = "webArchiveCache:";
 const CACHE_VERSION = "v2";
@@ -106,6 +109,42 @@ const buildShareUrl = ({ originalUrl: pageUrl, cacheKey, title, excerpt, image }
   return target.toString();
 };
 
+const buildQrImageUrl = (value) => {
+  const target = new URL("https://api.qrserver.com/v1/create-qr-code/");
+  target.searchParams.set("size", "176x176");
+  target.searchParams.set("margin", "0");
+  target.searchParams.set("ecc", "M");
+  target.searchParams.set("data", value);
+  return target.toString();
+};
+
+const updateShareQr = (shareUrl) => {
+  if (!shareQr || !shareQrImage || !shareQrLink) return;
+  const value = String(shareUrl || "").trim();
+  if (!value || value === "#") {
+    shareQr.hidden = true;
+    shareQrLink.href = "#";
+    shareQrImage.removeAttribute("src");
+    shareQrImage.removeAttribute("data-share-url");
+    return;
+  }
+  if (shareQrImage.dataset.shareUrl !== value) {
+    shareQrImage.src = buildQrImageUrl(value);
+    shareQrImage.dataset.shareUrl = value;
+  }
+  shareQrLink.href = value;
+  shareQr.hidden = false;
+};
+
+const clearShareUi = () => {
+  if (shareButton) {
+    shareButton.disabled = true;
+    shareButton.dataset.url = "";
+    shareButton.dataset.state = "";
+  }
+  updateShareQr("");
+};
+
 const loadCachePayload = (cacheKey) => {
   if (!cacheKey) return null;
   try {
@@ -130,7 +169,6 @@ const saveCachePayload = (cacheKey, payload) => {
 };
 
 const updateShareButton = (payload, cacheKey, fallbackUrl) => {
-  if (!shareButton) return;
   const shareUrl = buildShareUrl({
     originalUrl: payload?.originalUrl || fallbackUrl,
     cacheKey,
@@ -138,9 +176,12 @@ const updateShareButton = (payload, cacheKey, fallbackUrl) => {
     excerpt: payload?.excerpt || payload?.byline,
     image: payload?.heroImage,
   });
-  shareButton.disabled = false;
-  shareButton.dataset.url = shareUrl;
-  shareButton.dataset.state = "";
+  if (shareButton) {
+    shareButton.disabled = false;
+    shareButton.dataset.url = shareUrl;
+    shareButton.dataset.state = "";
+  }
+  updateShareQr(shareUrl);
 };
 
 const fixImages = (container, timestamp) => {
@@ -340,6 +381,7 @@ const applyPayload = (payload, { fromCache = false } = {}) => {
 const params = new URLSearchParams(window.location.search);
 const url = params.get("url");
 let cacheKey = params.get("cache");
+clearShareUi();
 
 const cached = cacheKey ? loadCachePayload(cacheKey) : null;
 if (cached) {
@@ -348,6 +390,7 @@ if (cached) {
 } else if (!url) {
   titleEl.textContent = "Missing URL";
   document.title = "Missing URL";
+  clearShareUi();
   setStatus("Add ?url= to the address, or go back to the homepage.", "error");
 } else {
   setStatus("Loading archived reader view...", "loading");
@@ -361,6 +404,7 @@ if (cached) {
       if (data.status === "blocked") {
         titleEl.textContent = "Archive unavailable";
         document.title = "Archive unavailable";
+        clearShareUi();
         const submission = data.submission || {};
         const suffix = submission.statusCode ? ` (${submission.statusCode})` : "";
         const detail = submission.label
@@ -378,6 +422,7 @@ if (cached) {
       if (data.status === "submitted") {
         titleEl.textContent = "Archive submitted";
         document.title = "Archive submitted";
+        clearShareUi();
         setStatus(data.message || "Archive submitted.", "info");
         if (data.archiveUrl) {
           archiveLink.href = data.archiveUrl;
@@ -388,6 +433,7 @@ if (cached) {
       if (data.status === "archived_link_only") {
         titleEl.textContent = data.title || "Archived snapshot";
         document.title = titleEl.textContent;
+        clearShareUi();
         archiveLink.href = data.archiveUrl || "#";
         originalUrl.textContent = data.originalUrl || url;
         bylineEl.textContent = "";
@@ -434,6 +480,7 @@ if (cached) {
     .catch((error) => {
       titleEl.textContent = "Could not load reader view";
       document.title = "Could not load reader view";
+      clearShareUi();
       setStatus(error.message, "error");
     });
 }
