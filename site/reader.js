@@ -34,17 +34,6 @@ const buildCacheKey = (payload) => {
   return `wa-${(hash >>> 0).toString(36)}`;
 };
 
-const buildReaderUrl = (url, cacheKey) => {
-  const target = new URL("/reader.html", window.location.origin);
-  if (url) {
-    target.searchParams.set("url", url);
-  }
-  if (cacheKey) {
-    target.searchParams.set("cache", cacheKey);
-  }
-  return target.toString();
-};
-
 const normalizeShareText = (value, maxLength) => {
   const normalized = String(value || "").replace(/\s+/g, " ").trim();
   if (!normalized) return "";
@@ -109,7 +98,7 @@ const buildShareUrl = ({ originalUrl: pageUrl, cacheKey, title, excerpt, image }
   return target.toString();
 };
 
-const buildCompactQrTargetUrl = (shareUrl) => {
+const buildCompactShareUrl = (shareUrl) => {
   try {
     const parsed = new URL(shareUrl);
     const compact = new URL(parsed.pathname, parsed.origin);
@@ -125,6 +114,60 @@ const buildCompactQrTargetUrl = (shareUrl) => {
   } catch (error) {
     return String(shareUrl || "").trim();
   }
+};
+
+const upsertMeta = (selector, attrName, attrValue, content) => {
+  if (!content) return;
+  let node = document.head.querySelector(selector);
+  if (!node) {
+    node = document.createElement("meta");
+    node.setAttribute(attrName, attrValue);
+    document.head.appendChild(node);
+  }
+  node.setAttribute("content", content);
+};
+
+const upsertCanonical = (href) => {
+  if (!href) return;
+  let node = document.head.querySelector('link[rel="canonical"]');
+  if (!node) {
+    node = document.createElement("link");
+    node.setAttribute("rel", "canonical");
+    document.head.appendChild(node);
+  }
+  node.setAttribute("href", href);
+};
+
+const updateShareMeta = (payload, shareUrl) => {
+  const safeTitle = normalizeShareText(payload?.title, 180) || "Web Archive Reader";
+  const safeDescription =
+    normalizeShareText(payload?.excerpt || payload?.byline, 280) ||
+    "Reader view for archived pages from the Wayback Machine.";
+  const safeImage = String(payload?.heroImage || "").trim();
+  const safeShareUrl = String(shareUrl || "").trim();
+
+  upsertMeta('meta[name="description"]', "name", "description", safeDescription);
+  upsertMeta('meta[property="og:title"]', "property", "og:title", safeTitle);
+  upsertMeta('meta[property="og:description"]', "property", "og:description", safeDescription);
+  if (safeImage) {
+    upsertMeta('meta[property="og:image"]', "property", "og:image", safeImage);
+    upsertMeta('meta[name="twitter:image"]', "name", "twitter:image", safeImage);
+  }
+  if (safeShareUrl) {
+    upsertMeta('meta[property="og:url"]', "property", "og:url", safeShareUrl);
+    upsertCanonical(safeShareUrl);
+  }
+  upsertMeta('meta[name="twitter:title"]', "name", "twitter:title", safeTitle);
+  upsertMeta('meta[name="twitter:description"]', "name", "twitter:description", safeDescription);
+};
+
+const syncAddressWithShareUrl = (shareUrl) => {
+  const compactUrl = buildCompactShareUrl(shareUrl);
+  if (!compactUrl || compactUrl === "#") return compactUrl;
+  if (window.location.href !== compactUrl) {
+    window.history.replaceState(null, "", compactUrl);
+  }
+  return compactUrl;
 };
 
 const buildQrImageUrl = (value) => {
@@ -146,7 +189,7 @@ const updateShareQr = (shareUrl) => {
     shareQrImage.removeAttribute("data-share-url");
     return;
   }
-  const qrTargetUrl = buildCompactQrTargetUrl(rawValue);
+  const qrTargetUrl = buildCompactShareUrl(rawValue);
   if (!qrTargetUrl || qrTargetUrl === "#") {
     shareQr.hidden = true;
     shareQrLink.href = "#";
@@ -208,6 +251,8 @@ const updateShareButton = (payload, cacheKey, fallbackUrl) => {
     shareButton.dataset.state = "";
   }
   updateShareQr(shareUrl);
+  updateShareMeta(payload, shareUrl);
+  syncAddressWithShareUrl(shareUrl);
 };
 
 const fixImages = (container, timestamp) => {
@@ -497,11 +542,6 @@ if (cached) {
 
       applyPayload(payload);
       updateShareButton(payload, cacheKey, url);
-
-      const nextUrl = buildReaderUrl(payload.originalUrl || url, cacheKey);
-      if (nextUrl && window.location.href !== nextUrl) {
-        window.history.replaceState(null, "", nextUrl);
-      }
     })
     .catch((error) => {
       titleEl.textContent = "Could not load reader view";

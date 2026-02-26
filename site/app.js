@@ -156,7 +156,7 @@ const resetResult = () => {
   archiveLink.href = "#";
   archiveLink.textContent = "View on web.archive.org";
   readerLink.href = "#";
-  readerLink.textContent = "Open clean reader view";
+  readerLink.textContent = "Open clean reader view with QR code";
   if (shareButton) {
     shareButton.disabled = true;
     shareButton.dataset.state = "";
@@ -423,7 +423,7 @@ const checkArchiveForUrl = async (url) => {
     image: data.heroImage,
   });
   readerLink.href = readerUrl;
-  readerLink.textContent = "Open clean reader view";
+  readerLink.textContent = "Open clean reader view with QR code";
   if (shareButton) {
     shareButton.disabled = false;
     shareButton.dataset.url = shareUrl;
