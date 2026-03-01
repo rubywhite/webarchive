@@ -137,15 +137,11 @@ const setReaderWarning = (warning) => {
   readerWarning.classList.remove("hidden");
 };
 
-const buildShareUrl = ({ originalUrl: pageUrl, cacheKey, title, excerpt, image }) => {
+const buildShareUrl = ({ originalUrl: pageUrl, cacheKey, title }) => {
   const target = new URL(cacheKey ? `/s/${encodeURIComponent(cacheKey)}` : "/s", window.location.origin);
-  if (cacheKey) target.searchParams.set("cache", cacheKey);
   if (pageUrl) target.searchParams.set("url", pageUrl);
   const cleanTitle = normalizeShareText(title, 180);
-  const cleanExcerpt = normalizeShareText(excerpt, 280);
   if (cleanTitle) target.searchParams.set("title", cleanTitle);
-  if (cleanExcerpt) target.searchParams.set("excerpt", cleanExcerpt);
-  if (image) target.searchParams.set("image", image);
   return target.toString();
 };
 
@@ -419,8 +415,6 @@ const checkArchiveForUrl = async (url) => {
     originalUrl: data.originalUrl,
     cacheKey,
     title: data.title,
-    excerpt: data.excerpt || data.byline,
-    image: data.heroImage,
   });
   readerLink.href = readerUrl;
   readerLink.textContent = "Open clean reader view with QR code";
@@ -476,7 +470,7 @@ if (shareButton) {
   shareButton.addEventListener("click", async () => {
     const url = shareButton.dataset.url;
     if (!url || url === "#") {
-      setStatus("No cache link to copy yet.", "error");
+      setStatus("No share link to copy yet.", "error");
       return;
     }
     try {
@@ -494,12 +488,12 @@ if (shareButton) {
         document.body.removeChild(temp);
       }
       shareButton.dataset.state = "copied";
-      setStatus("Cache link copied to clipboard.", "success");
+      setStatus("Share link copied to clipboard.", "success");
       setTimeout(() => {
         shareButton.dataset.state = "";
       }, 2000);
     } catch (error) {
-      setStatus("Unable to copy the cache link.", "error");
+      setStatus("Unable to copy the share link.", "error");
     }
   });
 }

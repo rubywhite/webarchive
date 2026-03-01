@@ -86,15 +86,11 @@ const setReaderWarning = (warning) => {
   readerWarning.classList.remove("hidden");
 };
 
-const buildShareUrl = ({ originalUrl: pageUrl, cacheKey, title, excerpt, image }) => {
+const buildShareUrl = ({ originalUrl: pageUrl, cacheKey, title }) => {
   const target = new URL(cacheKey ? `/s/${encodeURIComponent(cacheKey)}` : "/s", window.location.origin);
-  if (cacheKey) target.searchParams.set("cache", cacheKey);
   if (pageUrl) target.searchParams.set("url", pageUrl);
   const cleanTitle = normalizeShareText(title, 180);
-  const cleanExcerpt = normalizeShareText(excerpt, 280);
   if (cleanTitle) target.searchParams.set("title", cleanTitle);
-  if (cleanExcerpt) target.searchParams.set("excerpt", cleanExcerpt);
-  if (image) target.searchParams.set("image", image);
   return target.toString();
 };
 
@@ -103,9 +99,13 @@ const buildCompactShareUrl = (shareUrl) => {
     const parsed = new URL(shareUrl);
     const compact = new URL(parsed.pathname, parsed.origin);
     const targetUrl = parsed.searchParams.get("url");
+    const targetTitle = parsed.searchParams.get("title");
     const cache = parsed.searchParams.get("cache");
     if (targetUrl) {
       compact.searchParams.set("url", targetUrl);
+    }
+    if (targetTitle) {
+      compact.searchParams.set("title", targetTitle);
     }
     if (!compact.pathname.startsWith("/s/") && cache) {
       compact.searchParams.set("cache", cache);
@@ -238,13 +238,12 @@ const saveCachePayload = (cacheKey, payload) => {
 };
 
 const updateShareButton = (payload, cacheKey, fallbackUrl) => {
-  const shareUrl = buildShareUrl({
+  const fullShareUrl = buildShareUrl({
     originalUrl: payload?.originalUrl || fallbackUrl,
     cacheKey,
     title: payload?.title,
-    excerpt: payload?.excerpt || payload?.byline,
-    image: payload?.heroImage,
   });
+  const shareUrl = buildCompactShareUrl(fullShareUrl);
   if (shareButton) {
     shareButton.disabled = false;
     shareButton.dataset.url = shareUrl;
@@ -451,7 +450,16 @@ const applyPayload = (payload, { fromCache = false } = {}) => {
 
 const params = new URLSearchParams(window.location.search);
 const url = params.get("url");
-let cacheKey = params.get("cache");
+const cacheKeyFromPath = (() => {
+  const match = window.location.pathname.match(/^\/s\/([^/?#]+)/);
+  if (!match || !match[1]) return "";
+  try {
+    return decodeURIComponent(match[1]);
+  } catch (error) {
+    return match[1];
+  }
+})();
+let cacheKey = params.get("cache") || cacheKeyFromPath;
 clearShareUi();
 
 const cached = cacheKey ? loadCachePayload(cacheKey) : null;
@@ -555,7 +563,7 @@ if (shareButton) {
   shareButton.addEventListener("click", async () => {
     const shareUrl = shareButton.dataset.url;
     if (!shareUrl || shareUrl === "#") {
-      setStatus("No cache link to copy yet.", "error");
+      setStatus("No share link to copy yet.", "error");
       return;
     }
     try {
@@ -573,12 +581,12 @@ if (shareButton) {
         document.body.removeChild(temp);
       }
       shareButton.dataset.state = "copied";
-      setStatus("Cache link copied to clipboard.", "success");
+      setStatus("Share link copied to clipboard.", "success");
       setTimeout(() => {
         shareButton.dataset.state = "";
       }, 2000);
     } catch (error) {
-      setStatus("Unable to copy the cache link.", "error");
+      setStatus("Unable to copy the share link.", "error");
     }
   });
 }
