@@ -60,6 +60,37 @@ function resolveOrigin(event) {
   return `${proto}://${host}`;
 }
 
+function stripWaybackImageWrapper(value) {
+  return String(value || "").replace(
+    /^https?:\/\/web\.archive\.org\/web\/\d{14}[a-z]{0,2}_?\//i,
+    ""
+  );
+}
+
+function normalizeImageCandidate(value, origin) {
+  const cleaned = stripWaybackImageWrapper(normalizeText(value || "", 3000));
+  if (!cleaned) return "";
+  const absolute = toAbsoluteUrl(cleaned, origin) || cleaned;
+  if (!isHttpUrl(absolute)) return "";
+  try {
+    const parsed = new URL(absolute);
+    parsed.hash = "";
+    return parsed.toString();
+  } catch (error) {
+    return "";
+  }
+}
+
+function buildProxyImageUrl(image, origin, fallbackPath = "/RubyWhite.png") {
+  const fallbackImage = origin ? `${origin}${fallbackPath}` : fallbackPath;
+  const normalized = normalizeImageCandidate(image, origin);
+  if (!normalized) return fallbackImage;
+  if (!origin) return normalized;
+  const proxy = new URL("/.netlify/functions/og-image", origin);
+  proxy.searchParams.set("src", normalized);
+  return proxy.toString();
+}
+
 function extractCacheKeyFromEvent(event) {
   const candidates = [];
   if (event?.path) candidates.push(event.path);
@@ -149,8 +180,7 @@ exports.handler = async (event) => {
 
   const safeTitle = title || DEFAULT_TITLE;
   const safeDescription = description || DEFAULT_DESCRIPTION;
-  const fallbackImage = origin ? `${origin}/RubyWhite.png` : "/RubyWhite.png";
-  const safeImage = isHttpUrl(image) ? image : toAbsoluteUrl(image, origin) || fallbackImage;
+  const safeImage = buildProxyImageUrl(image, origin, "/RubyWhite.png");
   const safeReaderUrl = isHttpUrl(readerUrl) ? readerUrl : origin || "/";
   const safeShareUrl = safeReaderUrl;
 
@@ -165,6 +195,7 @@ exports.handler = async (event) => {
     <meta property="og:title" content="${escapeHtml(safeTitle)}" />
     <meta property="og:description" content="${escapeHtml(safeDescription)}" />
     <meta property="og:image" content="${escapeHtml(safeImage)}" />
+    <meta property="og:image:secure_url" content="${escapeHtml(safeImage)}" />
     <meta property="og:url" content="${escapeHtml(safeShareUrl)}" />
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content="${escapeHtml(safeTitle)}" />
