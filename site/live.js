@@ -102,6 +102,16 @@ const updateQr = (url) => {
   qrWrap.hidden = false;
 };
 
+const scrollPreviewIntoView = () => {
+  if (resultEl.classList.contains("hidden")) return;
+  requestAnimationFrame(() => {
+    resultEl.scrollIntoView({
+      behavior: "smooth",
+      block: "start",
+    });
+  });
+};
+
 const resetPreview = () => {
   resultEl.classList.add("hidden");
   document.title = DEFAULT_TITLE;
@@ -257,6 +267,7 @@ form.addEventListener("submit", async (event) => {
     const payload = await loadPreview(url);
     applyPayload(payload);
     setStatus("Live preview ready.", "success");
+    scrollPreviewIntoView();
   } catch (error) {
     setStatus(error.message, "error");
   } finally {
