@@ -9,7 +9,9 @@ const sourceEl = document.getElementById("live-source");
 const urlEl = document.getElementById("live-url");
 const contentEl = document.getElementById("live-content");
 const warningEl = document.getElementById("live-warning");
-const copyButton = document.getElementById("copy-button");
+const copyOriginalButton = document.getElementById("copy-original-button");
+const copyPageButton = document.getElementById("copy-page-button");
+const pdfButton = document.getElementById("pdf-button");
 const qrWrap = document.getElementById("live-qr");
 const qrLink = document.getElementById("live-qr-link");
 const qrImage = document.getElementById("live-qr-image");
@@ -112,6 +114,18 @@ const scrollPreviewIntoView = () => {
   });
 };
 
+const getPreviewPageUrl = () => {
+  const value = String(window.location.href || "").trim();
+  return value && value !== "#" ? value : "";
+};
+
+const setButtonEnabled = (button, enabled, url = "") => {
+  if (!button) return;
+  button.disabled = !enabled;
+  button.dataset.url = enabled ? url : "";
+  button.dataset.state = "";
+};
+
 const resetPreview = () => {
   resultEl.classList.add("hidden");
   document.title = DEFAULT_TITLE;
@@ -122,11 +136,9 @@ const resetPreview = () => {
   urlEl.textContent = "";
   contentEl.innerHTML = "";
   setWarning(null);
-  if (copyButton) {
-    copyButton.disabled = true;
-    copyButton.dataset.url = "";
-    copyButton.dataset.state = "";
-  }
+  setButtonEnabled(copyOriginalButton, false);
+  setButtonEnabled(copyPageButton, false);
+  if (pdfButton) pdfButton.disabled = true;
   updateQr("");
 };
 
@@ -154,6 +166,22 @@ const renderContentHtml = (html) => {
   }
 };
 
+const copyText = async (value) => {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  const temp = document.createElement("textarea");
+  temp.value = value;
+  temp.setAttribute("readonly", "");
+  temp.style.position = "absolute";
+  temp.style.left = "-9999px";
+  document.body.appendChild(temp);
+  temp.select();
+  document.execCommand("copy");
+  document.body.removeChild(temp);
+};
+
 const buildSourceLine = (payload) => {
   const parts = [];
   const publicationName = normalizeText(payload?.publicationName);
@@ -172,6 +200,7 @@ const buildSourceLine = (payload) => {
 
 const applyPayload = (payload) => {
   const pageUrl = String(payload?.pageUrl || payload?.resolvedUrl || payload?.originalUrl || "").trim();
+  const previewUrl = getPreviewPageUrl();
   titleEl.textContent = payload?.title || "Live preview";
   document.title = titleEl.textContent;
   bylineEl.textContent = buildTitleMeta({
@@ -185,11 +214,9 @@ const applyPayload = (payload) => {
   renderContentHtml(payload?.contentHtml || "");
   setWarning(payload?.extractionWarning || null);
   updateQr(pageUrl);
-  if (copyButton) {
-    copyButton.disabled = !pageUrl;
-    copyButton.dataset.url = pageUrl;
-    copyButton.dataset.state = "";
-  }
+  setButtonEnabled(copyOriginalButton, Boolean(pageUrl), pageUrl);
+  setButtonEnabled(copyPageButton, Boolean(previewUrl), previewUrl);
+  if (pdfButton) pdfButton.disabled = !pageUrl;
   resultEl.classList.remove("hidden");
 };
 
@@ -210,35 +237,54 @@ const loadPreview = async (url) => {
   return data;
 };
 
-if (copyButton) {
-  copyButton.addEventListener("click", async () => {
-    const url = copyButton.dataset.url;
+if (copyOriginalButton) {
+  copyOriginalButton.addEventListener("click", async () => {
+    const url = copyOriginalButton.dataset.url;
     if (!url || url === "#") {
       setStatus("No URL to copy yet.", "error");
       return;
     }
     try {
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(url);
-      } else {
-        const temp = document.createElement("textarea");
-        temp.value = url;
-        temp.setAttribute("readonly", "");
-        temp.style.position = "absolute";
-        temp.style.left = "-9999px";
-        document.body.appendChild(temp);
-        temp.select();
-        document.execCommand("copy");
-        document.body.removeChild(temp);
-      }
-      copyButton.dataset.state = "copied";
+      await copyText(url);
+      copyOriginalButton.dataset.state = "copied";
       setStatus("Original URL copied to clipboard.", "success");
       setTimeout(() => {
-        copyButton.dataset.state = "";
+        copyOriginalButton.dataset.state = "";
       }, 2000);
     } catch (error) {
       setStatus("Unable to copy the original URL.", "error");
     }
+  });
+}
+
+if (copyPageButton) {
+  copyPageButton.addEventListener("click", async () => {
+    const url = copyPageButton.dataset.url || getPreviewPageUrl();
+    if (!url || url === "#") {
+      setStatus("No preview URL to copy yet.", "error");
+      return;
+    }
+    try {
+      await copyText(url);
+      copyPageButton.dataset.state = "copied";
+      setStatus("This page URL copied to clipboard.", "success");
+      setTimeout(() => {
+        copyPageButton.dataset.state = "";
+      }, 2000);
+    } catch (error) {
+      setStatus("Unable to copy this page URL.", "error");
+    }
+  });
+}
+
+if (pdfButton) {
+  pdfButton.addEventListener("click", () => {
+    if (pdfButton.disabled || resultEl.classList.contains("hidden")) {
+      setStatus("Generate a preview before saving a PDF.", "error");
+      return;
+    }
+    setStatus("Print dialog opened. Choose Save as PDF to export this preview.", "success");
+    window.print();
   });
 }
 
@@ -265,6 +311,7 @@ form.addEventListener("submit", async (event) => {
 
   try {
     const payload = await loadPreview(url);
+    syncAddressWithUrl(payload?.pageUrl || payload?.resolvedUrl || payload?.originalUrl || url);
     applyPayload(payload);
     setStatus("Live preview ready.", "success");
     scrollPreviewIntoView();
