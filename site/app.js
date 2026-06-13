@@ -6,7 +6,9 @@ const readerTitle = document.getElementById("reader-title");
 const readerByline = document.getElementById("reader-byline");
 const archiveLink = document.getElementById("archive-link");
 const readerLink = document.getElementById("reader-link");
-const shareButton = document.getElementById("share-button");
+const copyOriginalButton = document.getElementById("copy-original-button");
+const copyPageButton = document.getElementById("copy-page-button");
+const pdfButton = document.getElementById("pdf-button");
 const archiveSource = document.getElementById("archive-source");
 const originalUrl = document.getElementById("original-url");
 const readerContent = document.getElementById("reader-content");
@@ -19,6 +21,26 @@ const CACHE_VERSION = "v2";
 const setStatus = (message, type = "info") => {
   statusEl.textContent = message || "";
   statusEl.dataset.type = type;
+};
+
+const getCurrentPageUrl = () => {
+  const value = String(window.location.href || "").trim();
+  return value && value !== "#" ? value : "";
+};
+
+const setButtonEnabled = (button, enabled, url = "") => {
+  if (!button) return;
+  button.disabled = !enabled;
+  button.dataset.url = enabled ? url : "";
+  button.dataset.state = "";
+};
+
+const updateHeaderActions = ({ original = "", current = "", enablePdf = false } = {}) => {
+  setButtonEnabled(copyOriginalButton, Boolean(original), original);
+  setButtonEnabled(copyPageButton, Boolean(current), current);
+  if (pdfButton) {
+    pdfButton.disabled = !enablePdf;
+  }
 };
 
 const normalizeUrl = (value) => value.trim();
@@ -74,6 +96,19 @@ const saveCachePayload = (cacheKey, payload) => {
   } catch (error) {
     // Ignore storage errors (private mode, quota exceeded, etc.)
   }
+};
+
+const syncAddressWithUrl = (url) => {
+  const next = new URL(window.location.href);
+  if (url) {
+    next.searchParams.set("url", url);
+  } else {
+    next.searchParams.delete("url");
+  }
+  if (next.toString() !== window.location.href) {
+    window.history.replaceState(null, "", next.toString());
+  }
+  return next.toString();
 };
 
 const buildReaderUrl = (url, cacheKey) => {
@@ -137,14 +172,6 @@ const setReaderWarning = (warning) => {
   readerWarning.classList.remove("hidden");
 };
 
-const buildShareUrl = ({ originalUrl: pageUrl, cacheKey, title }) => {
-  const target = new URL(cacheKey ? `/s/${encodeURIComponent(cacheKey)}` : "/s", window.location.origin);
-  if (pageUrl) target.searchParams.set("url", pageUrl);
-  const cleanTitle = normalizeShareText(title, 180);
-  if (cleanTitle) target.searchParams.set("title", cleanTitle);
-  return target.toString();
-};
-
 const resetResult = () => {
   resultSection.classList.add("hidden");
   readerTitle.textContent = "";
@@ -153,11 +180,7 @@ const resetResult = () => {
   archiveLink.textContent = "View on web.archive.org";
   readerLink.href = "#";
   readerLink.textContent = "Open clean reader view with QR code";
-  if (shareButton) {
-    shareButton.disabled = true;
-    shareButton.dataset.state = "";
-    shareButton.dataset.url = "";
-  }
+  updateHeaderActions();
   if (archiveSource) {
     archiveSource.textContent = "";
   }
@@ -353,17 +376,24 @@ const checkArchiveForUrl = async (url) => {
   if (data.status === "submitted") {
     setStatus("Not archived yet. We submitted it to the Wayback Machine.", "info");
     if (data.archiveUrl) {
+      syncAddressWithUrl(data.originalUrl || url);
       archiveLink.href = data.archiveUrl;
       archiveLink.textContent = "View the archived snapshot";
-      originalUrl.textContent = data.originalUrl;
+      originalUrl.textContent = data.originalUrl || url;
       readerContent.innerHTML =
         "<p>The archive is warming up. Check the snapshot link for the stored page.</p>";
       resultSection.classList.remove("hidden");
+      updateHeaderActions({
+        original: data.originalUrl || url,
+        current: getCurrentPageUrl(),
+        enablePdf: true,
+      });
     }
     return;
   }
 
   if (data.status === "archived_link_only") {
+    syncAddressWithUrl(data.originalUrl || url);
     setStatus(
       data.message || "Archive snapshot found, but clean reader extraction is unavailable right now.",
       "info"
@@ -378,6 +408,11 @@ const checkArchiveForUrl = async (url) => {
     readerContent.innerHTML =
       "<p>Wayback has a snapshot, but clean extraction is unavailable right now. Use the snapshot link above.</p>";
     resultSection.classList.remove("hidden");
+    updateHeaderActions({
+      original: data.originalUrl || url,
+      current: getCurrentPageUrl(),
+      enablePdf: true,
+    });
     return;
   }
 
@@ -410,19 +445,15 @@ const checkArchiveForUrl = async (url) => {
   const cacheKey = buildCacheKey(cachePayload);
   saveCachePayload(cacheKey, cachePayload);
 
+  syncAddressWithUrl(data.originalUrl || url);
   const readerUrl = buildReaderUrl(data.originalUrl, cacheKey);
-  const shareUrl = buildShareUrl({
-    originalUrl: data.originalUrl,
-    cacheKey,
-    title: data.title,
-  });
   readerLink.href = readerUrl;
   readerLink.textContent = "Open clean reader view with QR code";
-  if (shareButton) {
-    shareButton.disabled = false;
-    shareButton.dataset.url = shareUrl;
-    shareButton.dataset.state = "";
-  }
+  updateHeaderActions({
+    original: data.originalUrl,
+    current: getCurrentPageUrl(),
+    enablePdf: true,
+  });
 
   if (archiveSource) {
     if (data.archiveSource) {
@@ -447,13 +478,17 @@ form.addEventListener("submit", async (event) => {
   const url = raw.replace(/\s+/g, "").trim();
   if (!url) {
     setStatus("Enter a URL to check the archive.", "error");
+    syncAddressWithUrl("");
+    resetResult();
     return;
   }
   if (!isValidHttpUrl(url)) {
     setStatus("Enter a valid URL starting with http:// or https://", "error");
+    resetResult();
     return;
   }
 
+  syncAddressWithUrl(url);
   setStatus("Checking the Wayback Machine...", "loading");
   form.classList.add("loading");
 
@@ -466,34 +501,75 @@ form.addEventListener("submit", async (event) => {
   }
 });
 
-if (shareButton) {
-  shareButton.addEventListener("click", async () => {
-    const url = shareButton.dataset.url;
+const copyText = async (value) => {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  const temp = document.createElement("textarea");
+  temp.value = value;
+  temp.setAttribute("readonly", "");
+  temp.style.position = "absolute";
+  temp.style.left = "-9999px";
+  document.body.appendChild(temp);
+  temp.select();
+  document.execCommand("copy");
+  document.body.removeChild(temp);
+};
+
+if (copyOriginalButton) {
+  copyOriginalButton.addEventListener("click", async () => {
+    const url = copyOriginalButton.dataset.url;
     if (!url || url === "#") {
-      setStatus("No share link to copy yet.", "error");
+      setStatus("No original URL to copy yet.", "error");
       return;
     }
     try {
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(url);
-      } else {
-        const temp = document.createElement("textarea");
-        temp.value = url;
-        temp.setAttribute("readonly", "");
-        temp.style.position = "absolute";
-        temp.style.left = "-9999px";
-        document.body.appendChild(temp);
-        temp.select();
-        document.execCommand("copy");
-        document.body.removeChild(temp);
-      }
-      shareButton.dataset.state = "copied";
-      setStatus("Share link copied to clipboard.", "success");
+      await copyText(url);
+      copyOriginalButton.dataset.state = "copied";
+      setStatus("Original URL copied to clipboard.", "success");
       setTimeout(() => {
-        shareButton.dataset.state = "";
+        copyOriginalButton.dataset.state = "";
       }, 2000);
     } catch (error) {
-      setStatus("Unable to copy the share link.", "error");
+      setStatus("Unable to copy the original URL.", "error");
     }
   });
+}
+
+if (copyPageButton) {
+  copyPageButton.addEventListener("click", async () => {
+    const url = copyPageButton.dataset.url || getCurrentPageUrl();
+    if (!url || url === "#") {
+      setStatus("No page URL to copy yet.", "error");
+      return;
+    }
+    try {
+      await copyText(url);
+      copyPageButton.dataset.state = "copied";
+      setStatus("This page URL copied to clipboard.", "success");
+      setTimeout(() => {
+        copyPageButton.dataset.state = "";
+      }, 2000);
+    } catch (error) {
+      setStatus("Unable to copy this page URL.", "error");
+    }
+  });
+}
+
+if (pdfButton) {
+  pdfButton.addEventListener("click", () => {
+    if (pdfButton.disabled || resultSection.classList.contains("hidden")) {
+      setStatus("Load a result before saving a PDF.", "error");
+      return;
+    }
+    setStatus("Print dialog opened. Choose Save as PDF to export this page.", "success");
+    window.print();
+  });
+}
+
+const initialUrl = new URLSearchParams(window.location.search).get("url");
+if (initialUrl) {
+  input.value = initialUrl;
+  form.requestSubmit();
 }

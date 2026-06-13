@@ -5,7 +5,9 @@ const archiveSource = document.getElementById("archive-source");
 const originalUrl = document.getElementById("original-url");
 const contentEl = document.getElementById("reader-content");
 const statusEl = document.getElementById("reader-status");
-const shareButton = document.getElementById("share-button");
+const copyOriginalButton = document.getElementById("copy-original-button");
+const copyPageButton = document.getElementById("copy-page-button");
+const pdfButton = document.getElementById("pdf-button");
 const readerWarning = document.getElementById("reader-warning");
 const shareQr = document.getElementById("share-qr");
 const shareQrImage = document.getElementById("share-qr-image");
@@ -17,6 +19,42 @@ const CACHE_VERSION = "v2";
 const setStatus = (message, type = "info") => {
   statusEl.textContent = message || "";
   statusEl.dataset.type = type;
+};
+
+const getCurrentPageUrl = () => {
+  const value = String(window.location.href || "").trim();
+  return value && value !== "#" ? value : "";
+};
+
+const setButtonEnabled = (button, enabled, url = "") => {
+  if (!button) return;
+  button.disabled = !enabled;
+  button.dataset.url = enabled ? url : "";
+  button.dataset.state = "";
+};
+
+const updateHeaderActions = ({ original = "", current = "", enablePdf = false } = {}) => {
+  setButtonEnabled(copyOriginalButton, Boolean(original), original);
+  setButtonEnabled(copyPageButton, Boolean(current), current);
+  if (pdfButton) {
+    pdfButton.disabled = !enablePdf;
+  }
+};
+
+const copyText = async (value) => {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  const temp = document.createElement("textarea");
+  temp.value = value;
+  temp.setAttribute("readonly", "");
+  temp.style.position = "absolute";
+  temp.style.left = "-9999px";
+  document.body.appendChild(temp);
+  temp.select();
+  document.execCommand("copy");
+  document.body.removeChild(temp);
 };
 
 const buildCacheKey = (payload) => {
@@ -206,11 +244,7 @@ const updateShareQr = (shareUrl) => {
 };
 
 const clearShareUi = () => {
-  if (shareButton) {
-    shareButton.disabled = true;
-    shareButton.dataset.url = "";
-    shareButton.dataset.state = "";
-  }
+  updateHeaderActions();
   updateShareQr("");
 };
 
@@ -244,14 +278,14 @@ const updateShareButton = (payload, cacheKey, fallbackUrl) => {
     title: payload?.title,
   });
   const shareUrl = buildCompactShareUrl(fullShareUrl);
-  if (shareButton) {
-    shareButton.disabled = false;
-    shareButton.dataset.url = shareUrl;
-    shareButton.dataset.state = "";
-  }
+  const currentPageUrl = syncAddressWithShareUrl(shareUrl) || getCurrentPageUrl();
+  updateHeaderActions({
+    original: payload?.originalUrl || fallbackUrl || "",
+    current: currentPageUrl,
+    enablePdf: true,
+  });
   updateShareQr(shareUrl);
   updateShareMeta(payload, shareUrl);
-  syncAddressWithShareUrl(shareUrl);
 };
 
 const fixImages = (container, timestamp) => {
@@ -505,8 +539,13 @@ if (cached) {
         setStatus(data.message || "Archive submitted.", "info");
         if (data.archiveUrl) {
           archiveLink.href = data.archiveUrl;
-          originalUrl.textContent = data.originalUrl;
+          originalUrl.textContent = data.originalUrl || url;
         }
+        updateHeaderActions({
+          original: data.originalUrl || url,
+          current: getCurrentPageUrl(),
+          enablePdf: true,
+        });
         return;
       }
       if (data.status === "archived_link_only") {
@@ -523,6 +562,11 @@ if (cached) {
           data.message || "Archive snapshot found, but clean reader extraction is unavailable.",
           "info"
         );
+        updateHeaderActions({
+          original: data.originalUrl || url,
+          current: getCurrentPageUrl(),
+          enablePdf: true,
+        });
         return;
       }
       if (data.status !== "archived") {
@@ -559,34 +603,53 @@ if (cached) {
     });
 }
 
-if (shareButton) {
-  shareButton.addEventListener("click", async () => {
-    const shareUrl = shareButton.dataset.url;
-    if (!shareUrl || shareUrl === "#") {
-      setStatus("No share link to copy yet.", "error");
+if (copyOriginalButton) {
+  copyOriginalButton.addEventListener("click", async () => {
+    const pageUrl = copyOriginalButton.dataset.url;
+    if (!pageUrl || pageUrl === "#") {
+      setStatus("No original URL to copy yet.", "error");
       return;
     }
     try {
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(shareUrl);
-      } else {
-        const temp = document.createElement("textarea");
-        temp.value = shareUrl;
-        temp.setAttribute("readonly", "");
-        temp.style.position = "absolute";
-        temp.style.left = "-9999px";
-        document.body.appendChild(temp);
-        temp.select();
-        document.execCommand("copy");
-        document.body.removeChild(temp);
-      }
-      shareButton.dataset.state = "copied";
-      setStatus("Share link copied to clipboard.", "success");
+      await copyText(pageUrl);
+      copyOriginalButton.dataset.state = "copied";
+      setStatus("Original URL copied to clipboard.", "success");
       setTimeout(() => {
-        shareButton.dataset.state = "";
+        copyOriginalButton.dataset.state = "";
       }, 2000);
     } catch (error) {
-      setStatus("Unable to copy the share link.", "error");
+      setStatus("Unable to copy the original URL.", "error");
     }
+  });
+}
+
+if (copyPageButton) {
+  copyPageButton.addEventListener("click", async () => {
+    const pageUrl = copyPageButton.dataset.url || getCurrentPageUrl();
+    if (!pageUrl || pageUrl === "#") {
+      setStatus("No page URL to copy yet.", "error");
+      return;
+    }
+    try {
+      await copyText(pageUrl);
+      copyPageButton.dataset.state = "copied";
+      setStatus("This page URL copied to clipboard.", "success");
+      setTimeout(() => {
+        copyPageButton.dataset.state = "";
+      }, 2000);
+    } catch (error) {
+      setStatus("Unable to copy this page URL.", "error");
+    }
+  });
+}
+
+if (pdfButton) {
+  pdfButton.addEventListener("click", () => {
+    if (pdfButton.disabled) {
+      setStatus("Load a reader page before saving a PDF.", "error");
+      return;
+    }
+    setStatus("Print dialog opened. Choose Save as PDF to export this page.", "success");
+    window.print();
   });
 }

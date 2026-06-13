@@ -619,7 +619,7 @@ button:disabled {
   margin-bottom: 20px;
 }
 
-.live-page-header {
+.stacked-actions-header {
   align-items: flex-start;
 }
 
@@ -780,12 +780,12 @@ button:disabled {
     padding: 24px 18px 64px;
   }
 
-  .live-page-header {
+  .stacked-actions-header {
     flex-direction: column;
     gap: 16px;
   }
 
-  .live-page-header .header-actions-stack {
+  .stacked-actions-header .header-actions-stack {
     margin-left: 0;
     width: 100%;
     align-items: stretch;
@@ -843,19 +843,25 @@ button:disabled {
   .site-header,
   .hero,
   .site-footer,
-  #live-status {
+  #live-status,
+  #status,
+  #reader-status,
+  .archive-form {
     display: none !important;
   }
 
+  main,
   .reader-shell {
     max-width: none;
     margin: 0;
   }
 
+  #result,
   #live-result {
     display: block !important;
   }
 
+  .result,
   .reader-info,
   .reader-mode .reader {
     background: #fff;
@@ -863,6 +869,11 @@ button:disabled {
     box-shadow: none;
   }
 
+  .result {
+    padding: 0.3in;
+  }
+
+  .result-header,
   .reader-info {
     margin-bottom: 18px;
     page-break-inside: avoid;
